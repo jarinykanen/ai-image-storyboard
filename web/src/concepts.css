@@ -1,0 +1,21 @@
+.optional { color: #777; font-weight: 400; }
+.concept-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+.concept-card { overflow: hidden; border: 1px solid #2d2d2d; border-radius: 14px; background: #1b1b1b; }
+.concept-card.selected { border-color: #c8b4ff; box-shadow: 0 0 0 1px #8d70d6; }
+.concept-image { display: grid; aspect-ratio: 16 / 9; place-items: center; background: #0b0b0b; color: #666; }
+.concept-image img { width: 100%; height: 100%; object-fit: cover; }
+.concept-content { padding: 18px; }
+.concept-heading { display: flex; align-items: start; justify-content: space-between; gap: 10px; }
+.concept-heading h2 { margin-bottom: 4px; font-size: 21px; }
+.selected-badge { border-radius: 999px; background: #513c82; padding: 4px 8px; color: #eee; font-size: 12px; font-weight: 700; }
+.concept-card dl { display: grid; gap: 12px; margin: 18px 0; }
+.concept-card dl div { display: grid; gap: 3px; }
+.concept-card dt { color: #888; font-size: 12px; letter-spacing: .07em; text-transform: uppercase; }
+.concept-card dd { margin: 0; color: #ddd; line-height: 1.4; }
+.empty-concepts { margin: auto; text-align: center; }
+.empty-concepts p { margin-bottom: 22px; }
+.manual-concept { margin: 0 0 20px; }
+.concept-form { display: grid; gap: 12px; }
+.text-actions { padding-top: 4px; border-top: 1px solid #303030; }
+.image-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; padding-top: 14px; border-top: 1px solid #3a3a3a; color: #aaa; font-size: 13px; }
+.outdated-image { color: #ffc783; font-size: 14px; margin: 12px 0 0; }

@@ -1,0 +1,13 @@
+{
+  "name": "ai-music-video-studio",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"npm --prefix server run dev\" \"npm --prefix web run dev\"",
+    "install:all": "npm install && npm --prefix server install && npm --prefix web install",
+    "typecheck": "npm --prefix server run typecheck && npm --prefix web run typecheck",
+    "build": "npm run typecheck && npm --prefix web run build"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
