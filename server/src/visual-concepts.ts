@@ -66,6 +66,10 @@ export function createConcept(projectId: string, input: ConceptInput) {
 export function updateConcept(projectId: string, conceptId: string, input: ConceptInput) {
   const result = db.prepare(`UPDATE visual_concepts SET title = ?, description = ?, mood = ?, visual_style = ?, color_and_lighting = ?, narrative_direction = ? WHERE id = ? AND project_id = ?`)
     .run(input.title, input.description, input.mood, input.visualStyle, input.colorAndLighting, input.narrativeDirection, conceptId, projectId);
+  if (result.changes && db.prepare("SELECT id FROM visual_concepts WHERE id=? AND status='selected'").get(conceptId)) {
+    db.prepare("UPDATE image_generations SET stale=1 WHERE project_id=? AND tier='FINAL'").run(projectId);
+    db.prepare("UPDATE image_assets SET stale=1 WHERE id IN (SELECT asset_id FROM image_generations WHERE project_id=? AND tier='FINAL')").run(projectId);
+  }
   return result.changes ? getConcepts(projectId).find(concept => concept.id === conceptId)! : null;
 }
 
@@ -81,6 +85,10 @@ export function selectConcept(projectId: string, conceptId: string) {
     db.prepare("UPDATE visual_concepts SET status = 'selected' WHERE id = ? AND project_id = ?").run(conceptId, projectId);
     return true;
   })();
+  if (selected) {
+    db.prepare("UPDATE image_generations SET stale=1 WHERE project_id=? AND tier='FINAL'").run(projectId);
+    db.prepare("UPDATE image_assets SET stale=1 WHERE id IN (SELECT asset_id FROM image_generations WHERE project_id=? AND tier='FINAL')").run(projectId);
+  }
   return selected;
 }
 
@@ -102,8 +110,8 @@ export async function generateConceptImage(project: { id: string; image_provider
     const prompt = buildConceptImagePrompt(row);
     const style = { id: 'concept-style', type: 'style' as const, name: 'Visual Style', description: row.visual_style, imageAsset: null, locked: false, stale: false };
     const result = await generateImage(project.image_provider, { projectId: project.id, shotId: `concept:${conceptId}`, aspectRatio: project.aspect_ratio, visualStyle: row.visual_style, concept: null, description: prompt, action: '', shotType: 'concept reference', camera: '', mood: row.mood, characters: [], location: null, previousShot: null, referenceContext: { style, characters: [], location: null, continuityReference: null }, generationInstructions: '', prompt, qualityPreset: qualityPreset ?? (project as any).image_quality_preset, modelOverride: (project as any).image_model_override, resolutionOverride: (project as any).image_resolution_override });
-    const asset = await createGeneratedAsset({ projectId:project.id, ownerType:'concept', ownerId:conceptId, url:result.url, provider:project.image_provider, model:result.model, quality:result.quality, resolution:result.resolution });
-    db.prepare("UPDATE visual_concepts SET reference_image_url = ?, image_status = 'generated', image_concept_signature = ?, image_provider=?, image_model=?, image_quality=?, image_resolution=? WHERE id = ?").run(asset.url, conceptSignature({ title: row.title, description: row.description, mood: row.mood, visualStyle: row.visual_style, colorAndLighting: row.color_and_lighting, narrativeDirection: row.narrative_direction }), project.image_provider, result.model, result.quality, result.resolution, conceptId);
+    const asset = await createGeneratedAsset({ projectId:project.id, ownerType:'concept', ownerId:conceptId, url:result.url, provider:result.provider, model:result.model, quality:result.quality, resolution:result.resolution, tier:result.tier });
+    db.prepare("UPDATE visual_concepts SET reference_image_url = ?, image_status = 'generated', image_concept_signature = ?, image_provider=?, image_model=?, image_quality=?, image_resolution=? WHERE id = ?").run(asset.url, conceptSignature({ title: row.title, description: row.description, mood: row.mood, visualStyle: row.visual_style, colorAndLighting: row.color_and_lighting, narrativeDirection: row.narrative_direction }), result.provider, result.model, result.quality, result.resolution, conceptId);
     const imageUrl = asset.url;
     return imageUrl;
   } catch (error) {

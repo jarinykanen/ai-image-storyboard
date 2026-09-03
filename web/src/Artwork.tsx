@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Alert, Button, Group, Paper, Select, SimpleGrid, Stack, Text, Textarea, TextInput } from '@mantine/core';
 import { ConfirmModal } from './ConfirmModal';
 import { ImageGenerationModal, type ImageQuality } from './ImageGenerationModal';
-const API='http://localhost:3001/api'; type Asset={id:string;url:string;version:number;active:boolean};type Artwork={id:string;platform:string;sourceImage?:{id:string;url:string}|null;variants:Asset[]};
+const API='http://localhost:3001/api'; type Asset={id:string;url:string;version:number;active:boolean;source:'generated'|'uploaded';tier:'DRAFT'|'STANDARD'|'FINAL'|null;stale:boolean;model:string|null;resolution:string|null};type Artwork={id:string;platform:string;sourceImage?:{id:string;url:string}|null;variants:Asset[]};
 const labels:Record<string,string>={youtube:'YouTube','youtube-shorts':'YouTube Shorts',tiktok:'TikTok',spotify:'Spotify',landscape:'Generic Landscape',vertical:'Generic Vertical',square:'Generic Square'};
 async function api(path:string,method:string,body?:unknown){const r=await fetch(API+path,{method,headers:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});if(!r.ok)throw new Error((await r.json()).error||'Could not update artwork.');return r.json();}
 export function ArtworkPage({project,artwork,shots,onRefresh}:{project:any;artwork:Artwork[];shots:any[];onRefresh:()=>Promise<void>}){const[platform,setPlatform]=useState(project.primary_visual_format||'landscape'),[count,setCount]=useState(3),[strategy,setStrategy]=useState('Cinematic'),[customStylePrompt,setCustomStylePrompt]=useState(''),[text,setText]=useState(project.title||''),[subtitle,setSubtitle]=useState(''),[style,setStyle]=useState('Bold impact'),[mood,setMood]=useState('Epic'),[busy,setBusy]=useState(false),[error,setError]=useState(''),[confirm,setConfirm]=useState<'generate'|'delete'|null>(null),[asset,setAsset]=useState<string|null>(null);const targets:string[]=JSON.parse(project.publishing_targets||'[]'),active=artwork.find(a=>a.platform===platform),shotsWithAssets=shots.map(s=>({...s,asset:s.generations?.find((g:any)=>g.active&&g.assetId)||s.generations?.find((g:any)=>g.assetId)})).filter(s=>s.asset);const run=async(f:()=>Promise<unknown>)=>{setBusy(true);setError('');try{await f();await onRefresh()}catch(e){setError(e instanceof Error?e.message:'Could not complete artwork action.')}finally{setBusy(false)}};return <main className="artwork-page">
@@ -42,7 +42,7 @@ export function ArtworkPage({project,artwork,shots,onRefresh}:{project:any;artwo
 </Paper>}{active?.variants.map(v=>
 <Paper className="comparison-image" p="sm" key={v.id}>
 <img src={v.url} alt={`Artwork version ${v.version}`}/>
-<Text size="sm">Version {v.version}{v.active?' · ACTIVE':''}</Text>
+<Text size="sm">Version {v.version} · {v.source==='uploaded'?'UPLOADED':`${v.tier ?? 'STANDARD'}${v.tier==='FINAL'&&v.stale?' · STALE':''}`}{v.active?' · ACTIVE':''}{v.source==='generated'&&v.resolution?` · ${v.resolution}`:''}</Text>
 <Group>
 <Button component="a" variant="default" href={`${API}/assets/${v.id}/download`}>Download</Button>
 <Button color="red" disabled={busy} onClick={()=>{setAsset(v.id);setConfirm('delete')}}>Delete</Button>
@@ -59,6 +59,6 @@ export function ArtworkPage({project,artwork,shots,onRefresh}:{project:any;artwo
 </span>
 </Button>)}</div>
 </Paper>
-<ImageGenerationModal opened={confirm==='generate'} defaultQuality={(project.image_quality_preset || 'standard') as ImageQuality} title="Generate artwork variants?" message={`Generate ${count} ${labels[platform]} variants with this title treatment? This is a paid generation action.`} confirmLabel={`Generate ${count} variants`} loading={busy} onCancel={()=>setConfirm(null)} onConfirm={qualityPreset=>void run(()=>api(`/projects/${project.id}/artwork/generate`,'POST',{platform,count,strategy,customStylePrompt,text,subtitle,textConfig:{title:text,subtitle,style,mood},qualityPreset})).finally(()=>setConfirm(null))}/>
+<ImageGenerationModal opened={confirm==='generate'} projectId={project.id} imageCount={count} defaultQuality={'draft' as ImageQuality} title="Generate artwork variants?" message={`Generate ${count} ${labels[platform]} Draft variants with this title treatment? This is a paid generation action.`} confirmLabel={`Generate ${count} variants`} loading={busy} onCancel={()=>setConfirm(null)} onConfirm={qualityPreset=>void run(()=>api(`/projects/${project.id}/artwork/generate`,'POST',{platform,count,strategy,customStylePrompt,text,subtitle,textConfig:{title:text,subtitle,style,mood},qualityPreset})).finally(()=>setConfirm(null))}/>
 <ConfirmModal opened={confirm==='delete'} title="Delete artwork version?" message="Delete this artwork version? This cannot be undone." confirmLabel="Delete" confirmColor="red" loading={busy} onCancel={()=>setConfirm(null)} onConfirm={()=>{if(asset&&active)void run(()=>api(`/projects/${project.id}/artwork/${active.id}/assets/${asset}`,'DELETE')).finally(()=>setConfirm(null));}}/>
 </main>}

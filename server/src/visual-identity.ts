@@ -17,6 +17,10 @@ export type VisualIdentity = { style: VisualStyle; characters: VisualReference[]
 
 const referenceSignature = (name: string, description: string) => JSON.stringify({ name: name.trim(), description: description.trim() });
 const styleSignature = (description: string) => JSON.stringify({ description: description.trim() });
+function markProjectFinalsStale(projectId:string) {
+  db.prepare("UPDATE image_generations SET stale=1 WHERE project_id=? AND tier='FINAL'").run(projectId);
+  db.prepare("UPDATE image_assets SET stale=1 WHERE id IN (SELECT asset_id FROM image_generations WHERE project_id=? AND tier='FINAL')").run(projectId);
+}
 const asReference = (row: any): VisualReference => ({
   id: row.id, name: row.name, description: row.description, image_url: row.image_url ?? null,
   image_outdated: Boolean(row.image_url && row.image_signature !== referenceSignature(row.name, row.description)), locked: Boolean(row.locked), imageAssets:listAssets('reference',row.id),
@@ -44,6 +48,7 @@ export function updateVisualStyle(projectId: string, description: string) {
   ensureVisualIdentity(projectId);
   const result = db.prepare('UPDATE visual_identities SET style_description = ? WHERE project_id = ? AND style_locked = 0').run(description, projectId);
   if (!result.changes) throw new Error('Unlock the style reference before editing it.');
+  markProjectFinalsStale(projectId);
 }
 
 export function createReference(projectId: string, type: ReferenceType, name: string, description: string) {
@@ -55,6 +60,7 @@ export function createReference(projectId: string, type: ReferenceType, name: st
 
 export function updateReference(projectId: string, referenceId: string, name: string, description: string) {
   const result = db.prepare('UPDATE visual_references SET name = ?, description = ? WHERE id = ? AND project_id = ? AND locked = 0').run(name, description, referenceId, projectId);
+  if (result.changes) markProjectFinalsStale(projectId);
   return result.changes > 0;
 }
 
@@ -93,16 +99,17 @@ export async function generateVisualReference(project: { id: string; image_provi
   const result = await generateImage(project.image_provider, { projectId: project.id, shotId: `reference:${referenceId || 'style'}`, aspectRatio: project.aspect_ratio, visualStyle: identity.style.description, concept: null, description: prompt, action: '', shotType: 'reference image', camera: '', mood: '', characters: [], location: null, previousShot: null, referenceContext: { style, characters: [], location: null, continuityReference: null }, generationInstructions: '', prompt, qualityPreset: qualityPreset ?? (project as any).image_quality_preset, modelOverride: (project as any).image_model_override, resolutionOverride: (project as any).image_resolution_override });
   const ownerType = target === 'style' ? 'style' as const : 'reference' as const;
   const ownerId = target === 'style' ? project.id : referenceId!;
-  const asset = await createGeneratedAsset({ projectId:project.id, ownerType, ownerId, url:result.url, provider:project.image_provider, model:result.model, quality:result.quality, resolution:result.resolution });
+  const asset = await createGeneratedAsset({ projectId:project.id, ownerType, ownerId, url:result.url, provider:result.provider, model:result.model, quality:result.quality, resolution:result.resolution, tier:result.tier });
   const imageUrl = asset.url;
   if (target === 'style') {
     db.prepare('UPDATE visual_identities SET style_image_url = ?, style_image_signature = ?, style_image_provider=?, style_image_model=?, style_image_quality=?, style_image_resolution=? WHERE project_id = ?')
-      .run(imageUrl, styleSignature(identity.style.description), project.image_provider, result.model, result.quality, result.resolution, project.id);
+      .run(imageUrl, styleSignature(identity.style.description), result.provider, result.model, result.quality, result.resolution, project.id);
   } else {
     const reference = (target === 'character' ? identity.characters : identity.locations).find(item => item.id === referenceId)!;
     db.prepare('UPDATE visual_references SET image_url = ?, image_signature = ?, image_provider=?, image_model=?, image_quality=?, image_resolution=? WHERE id = ? AND project_id = ?')
-      .run(imageUrl, referenceSignature(reference.name, reference.description), project.image_provider, result.model, result.quality, result.resolution, referenceId, project.id);
+      .run(imageUrl, referenceSignature(reference.name, reference.description), result.provider, result.model, result.quality, result.resolution, referenceId, project.id);
   }
+  markProjectFinalsStale(project.id);
   return imageUrl;
 }
 
@@ -111,6 +118,7 @@ export function uploadVisualReference(projectId:string,target:'style'|ReferenceT
   if(target==='style') ensureVisualIdentity(projectId); else if(!db.prepare('SELECT id FROM visual_references WHERE id=? AND project_id=? AND type=?').get(referenceId,projectId,target)) return null;
   const asset=createUploadedAsset({projectId,ownerType,ownerId,data:file.buffer,mimeType:file.mimetype,originalFilename:file.originalname});
   if(target==='style') db.prepare('UPDATE visual_identities SET style_image_url=? WHERE project_id=?').run(asset.url,projectId); else db.prepare('UPDATE visual_references SET image_url=? WHERE id=? AND project_id=?').run(asset.url,referenceId,projectId);
+  markProjectFinalsStale(projectId);
   return asset;
 }
 
@@ -126,6 +134,7 @@ export function activateVisualReferenceAsset(projectId: string, target: 'style' 
   } else {
     db.prepare('UPDATE visual_references SET image_url=? WHERE id=? AND project_id=? AND type=?').run(asset.url, referenceId, projectId, target);
   }
+  markProjectFinalsStale(projectId);
   return asset;
 }
 
@@ -147,6 +156,7 @@ export function clearVisualReferenceImage(projectId: string, target: 'style' | R
     if (target === 'style') db.prepare('UPDATE visual_identities SET style_image_url=NULL WHERE project_id=?').run(projectId);
     else db.prepare('UPDATE visual_references SET image_url=NULL WHERE id=? AND project_id=? AND type=?').run(referenceId, projectId, target);
   })();
+  markProjectFinalsStale(projectId);
   return true;
 }
 

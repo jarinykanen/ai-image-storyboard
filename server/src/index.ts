@@ -9,14 +9,14 @@ import { db } from './db.js';
 import { createStoryboard, regenerateStoryboardShot, shotCountForDensity } from './storyboard.js';
 import { reviewStoryboard } from './storyboard-review.js';
 import { type StoryboardPlan, type StoryboardShotContent } from './storyboard-prompts.js';
-import { activateGeneration, addUploadedShotImage, deleteGeneration, generateSingle, refineSingle, getBatch, listGenerations, startBatch } from './image-generation.js';
+import { activateGeneration, addUploadedShotImage, approvedShotsNeedingFinal, deleteGeneration, generateSingle, generationEstimate, refineSingle, getBatch, listGenerations, shotsMissingImages, startBatch } from './image-generation.js';
 import { acknowledgeVisualReferenceImage, activateVisualReferenceAsset, clearVisualReferenceImage, createReference, deleteReference, ensureVisualIdentity, generateVisualReference, getVisualIdentity, setVisualLock, updateReference, updateVisualStyle, uploadVisualReference } from './visual-identity.js';
 import { createConcept, deleteConcept, generateConceptImage, generateConcepts, getConcepts, getSelectedConcept, regenerateConcept, selectConcept, updateConcept, uploadConceptImage } from './visual-concepts.js';
 import { findAsset, MAX_IMAGE_UPLOAD_BYTES } from './assets.js';
 import { buildCanvaExport, canvaExportSummary } from './canva-export.js';
 import { allPlatformPresets, platformPresets, type PlatformId } from './platform-presets.js';
 import { deleteArtworkAsset, generateArtwork, listArtwork, refineArtwork, updateArtwork, uploadArtwork, useSourceAsArtwork } from './artwork.js';
-import { type Provider, type ImageQuality, type ImageResolution, ProviderCapabilityError, ProviderCredentialError, ProviderNotConfiguredError, findImageModel, getProviderRegistry, getProviderSettings, normalizeProviderError, providerErrorMessage, removeProviderKey, resolveImageConfiguration, resolveProvider, saveProviderKey, testProvider } from './provider-settings.js';
+import { type Provider, type ImageQuality, type ImageResolution, type ImageTier, ProviderCapabilityError, ProviderCredentialError, ProviderNotConfiguredError, findImageModel, getProviderRegistry, getProviderSettings, normalizeProviderError, providerErrorMessage, removeProviderKey, resolveImageConfiguration, resolveProvider, saveProviderKey, testProvider } from './provider-settings.js';
 
 const app = express();
 app.use(cors());
@@ -33,9 +33,10 @@ const ProjectInput = z.object({
   visualStyle: z.string().min(1).max(500),
   aspectRatio: z.enum(['16:9', '9:16', '1:1']),
   imageProvider: z.enum(['openai', 'grok']),
-  imageQualityPreset: z.enum(['draft', 'standard', 'best']).default('standard'),
+  imageQualityPreset: z.enum(['draft', 'standard', 'best']).default('draft'),
 });
 const ImageQualityOverrideInput = z.object({ qualityPreset: z.enum(['draft', 'standard', 'best']).optional() });
+const ImageTierOverrideInput = ImageQualityOverrideInput.extend({ tier: z.enum(['DRAFT', 'STANDARD', 'FINAL']).optional() });
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
@@ -239,7 +240,7 @@ app.post('/api/projects/:id/concepts/:conceptId/image', async (req, res, next) =
   } catch (error) { next(error); }
 });
 app.post('/api/projects/:id/concepts/:conceptId/generate-variants', async (req, res, next) => {
-  try { const project=requireProject(req.params.id,res); if(!project)return; const {count,qualityPreset}=ImageQualityOverrideInput.extend({count:z.number().int().min(2).max(4)}).parse(req.body); for(let i=0;i<count;i++) await generateConceptImage(project,req.params.conceptId,qualityPreset); res.json({concept:getConcepts(project.id).find(item=>item.id===req.params.conceptId)}); } catch(error){next(error);}
+  try { const project=requireProject(req.params.id,res); if(!project)return; const {count,qualityPreset}=ImageQualityOverrideInput.extend({count:z.number().int().min(2).max(4)}).parse(req.body); for(let i=0;i<count;i++) await generateConceptImage(project,req.params.conceptId,qualityPreset ?? 'draft'); res.json({concept:getConcepts(project.id).find(item=>item.id===req.params.conceptId)}); } catch(error){next(error);}
 });
 app.post('/api/projects/:id/concepts/:conceptId/upload', upload.single('image'), (req,res) => { const projectId=String(req.params.id),conceptId=String(req.params.conceptId); if(!requireProject(projectId,res)) return; if(!req.file) return res.status(400).json({error:'Choose an image to upload.'}); const asset=uploadConceptImage(projectId,conceptId,req.file); if(!asset)return res.status(404).json({error:'Visual concept not found.'}); res.status(201).json({asset}); });
 
@@ -297,10 +298,10 @@ app.post('/api/projects/:id/visual-identity/style/image', async (req, res, next)
   } catch (error) { next(error); }
 });
 app.post('/api/projects/:id/visual-identity/style/generate-variants', async (req,res,next)=>{
-  try { const project=requireProject(req.params.id,res);if(!project)return;const {count,qualityPreset}=ImageQualityOverrideInput.extend({count:z.number().int().min(2).max(4)}).parse(req.body);for(let i=0;i<count;i++)await generateVisualReference(project,'style',undefined,qualityPreset);res.json(getVisualIdentity(project.id).style); } catch(error){next(error);}
+  try { const project=requireProject(req.params.id,res);if(!project)return;const {count,qualityPreset}=ImageQualityOverrideInput.extend({count:z.number().int().min(2).max(4)}).parse(req.body);for(let i=0;i<count;i++)await generateVisualReference(project,'style',undefined,qualityPreset ?? 'draft');res.json(getVisualIdentity(project.id).style); } catch(error){next(error);}
 });
 app.post('/api/projects/:id/visual-identity/:type/:referenceId/generate-variants', async (req,res,next)=>{
-  try { const project=requireProject(req.params.id,res);if(!project)return;const type=referenceType.parse(req.params.type);const {count,qualityPreset}=ImageQualityOverrideInput.extend({count:z.number().int().min(2).max(4)}).parse(req.body);for(let i=0;i<count;i++)await generateVisualReference(project,type,req.params.referenceId,qualityPreset);res.json(getVisualIdentity(project.id)); } catch(error){next(error);}
+  try { const project=requireProject(req.params.id,res);if(!project)return;const type=referenceType.parse(req.params.type);const {count,qualityPreset}=ImageQualityOverrideInput.extend({count:z.number().int().min(2).max(4)}).parse(req.body);for(let i=0;i<count;i++)await generateVisualReference(project,type,req.params.referenceId,qualityPreset ?? 'draft');res.json(getVisualIdentity(project.id)); } catch(error){next(error);}
 });
 app.post('/api/projects/:id/visual-identity/style/upload', upload.single('image'), (req,res) => { const projectId=String(req.params.id); if(!requireProject(projectId,res))return; if(!req.file)return res.status(400).json({error:'Choose an image to upload.'}); res.status(201).json({asset:uploadVisualReference(projectId,'style',undefined,req.file)}); });
 app.post('/api/projects/:id/visual-identity/:type/:referenceId/upload', upload.single('image'), (req,res) => { const projectId=String(req.params.id),referenceId=String(req.params.referenceId); if(!requireProject(projectId,res))return; if(!req.file)return res.status(400).json({error:'Choose an image to upload.'}); const asset=uploadVisualReference(projectId,referenceType.parse(String(req.params.type)),referenceId,req.file); if(!asset)return res.status(404).json({error:'Visual reference not found.'}); res.status(201).json({asset}); });
@@ -376,6 +377,82 @@ app.post('/api/projects/:id/storyboard', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+const ShotInsertInput = z.object({
+  placement: z.enum(['start', 'end', 'before', 'after']),
+  referenceShotId: z.string().uuid().optional(),
+  count: z.number().int().min(1).max(60).default(1),
+}).superRefine((input, context) => {
+  if ((input.placement === 'before' || input.placement === 'after') && !input.referenceShotId) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['referenceShotId'], message: 'Choose a shot to insert beside.' });
+  }
+});
+
+app.post('/api/projects/:id/shots', (req, res) => {
+  if (!requireProject(req.params.id, res)) return;
+  const input = ShotInsertInput.parse(req.body ?? {});
+  const existing = db.prepare('SELECT * FROM shots WHERE project_id=? ORDER BY position').all(req.params.id) as any[];
+  if (existing.length + input.count > 60) return res.status(400).json({ error: `A storyboard can contain at most 60 shots. You can add ${60 - existing.length} more.` });
+
+  const reference = input.referenceShotId
+    ? existing.find(shot => shot.id === input.referenceShotId)
+    : undefined;
+  if (input.referenceShotId && !reference) return res.status(404).json({ error: 'Storyboard shot not found.' });
+
+  const insertAt = input.placement === 'start' ? 1
+    : input.placement === 'end' ? existing.length + 1
+    : reference.position + (input.placement === 'after' ? 1 : 0);
+  const contextShot = reference ?? (input.placement === 'start' ? existing[0] : existing.at(-1));
+  const insertedIds: string[] = [];
+
+  db.transaction(() => {
+    db.prepare('UPDATE shots SET position=position+? WHERE project_id=? AND position>=?').run(input.count, req.params.id, insertAt);
+    const insert = db.prepare(`INSERT INTO shots
+      (id,project_id,position,start_seconds,end_seconds,section,title,description,action,shot_type,camera,mood,character_ids,location_id,prompt,status,generation_status,approval_status)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending','pending','unapproved')`);
+    for (let offset = 0; offset < input.count; offset += 1) {
+      const id = crypto.randomUUID();
+      insertedIds.push(id);
+      insert.run(id, req.params.id, insertAt + offset, null, null, contextShot?.section || 'Storyboard', 'Untitled shot', 'Describe what happens in this shot.', 'Describe the action in this shot.', 'Choose a shot type', 'Choose camera framing', contextShot?.mood || 'Define the mood', '[]', null, '');
+    }
+  })();
+
+  const inserted = insertedIds.map(id => asShot(db.prepare('SELECT * FROM shots WHERE id=?').get(id)));
+  res.status(201).json({ count: inserted.length, shots: inserted });
+});
+
+app.delete('/api/projects/:id/shots/:shotId', (req, res) => {
+  if (!requireProject(req.params.id, res)) return;
+  const shot = db.prepare('SELECT * FROM shots WHERE id=? AND project_id=?').get(req.params.shotId, req.params.id) as any;
+  if (!shot) return res.status(404).json({ error: 'Storyboard shot not found.' });
+
+  const activeGeneration = db.prepare("SELECT id FROM image_generations WHERE shot_id=? AND status IN ('queued','generating')").get(shot.id);
+  if (activeGeneration || shot.generation_status === 'generating') return res.status(409).json({ error: 'Wait for this shot to finish generating before deleting it.' });
+
+  const artwork = db.prepare(`SELECT project_artwork.id FROM project_artwork
+    JOIN image_assets ON image_assets.id=project_artwork.source_asset_id
+    WHERE project_artwork.project_id=? AND image_assets.owner_type='shot' AND image_assets.owner_id=? LIMIT 1`).get(req.params.id, shot.id);
+  if (artwork) return res.status(409).json({ error: 'This shot has an image used as artwork. Choose a different artwork source before deleting the shot.' });
+
+  const assets = (db.prepare("SELECT id FROM image_assets WHERE project_id=? AND owner_type='shot' AND owner_id=?").all(req.params.id, shot.id) as { id: string }[])
+    .map(item => findAsset(item.id))
+    .filter((asset): asset is NonNullable<ReturnType<typeof findAsset>> => Boolean(asset));
+
+  db.transaction(() => {
+    const issues = db.prepare(`SELECT storyboard_review_issues.id, storyboard_review_issues.shot_ids FROM storyboard_review_issues
+      JOIN storyboard_reviews ON storyboard_reviews.id=storyboard_review_issues.review_id
+      WHERE storyboard_reviews.project_id=?`).all(req.params.id) as { id: string; shot_ids: string }[];
+    const updateIssue = db.prepare('UPDATE storyboard_review_issues SET shot_ids=? WHERE id=?');
+    issues.forEach(issue => updateIssue.run(JSON.stringify((JSON.parse(issue.shot_ids) as string[]).filter(id => id !== shot.id)), issue.id));
+    db.prepare('DELETE FROM image_generations WHERE project_id=? AND shot_id=?').run(req.params.id, shot.id);
+    db.prepare("DELETE FROM image_assets WHERE project_id=? AND owner_type='shot' AND owner_id=?").run(req.params.id, shot.id);
+    db.prepare('DELETE FROM shots WHERE id=? AND project_id=?').run(shot.id, req.params.id);
+    db.prepare('UPDATE shots SET position=position-1 WHERE project_id=? AND position>?').run(req.params.id, shot.position);
+  })();
+
+  assets.forEach(asset => { if (fs.existsSync(asset.storagePath)) fs.unlinkSync(asset.storagePath); });
+  res.json({ deletedId: shot.id });
+});
+
 app.get('/api/projects/:id/storyboard-review', (req, res) => {
   if (!requireProject(req.params.id, res)) return;
   res.json(getLatestStoryboardReview(req.params.id));
@@ -404,7 +481,7 @@ app.put('/api/projects/:id/storyboard-review/issues/:issueId', (req, res) => {
   res.json(getLatestStoryboardReview(req.params.id));
 });
 
-const ShotEditInput = z.object({ description: z.string().min(1).max(4000), action: z.string().min(1).max(2000), shotType: z.string().min(1).max(200), camera: z.string().min(1).max(500), mood: z.string().min(1).max(500), characterIds: z.array(z.string()).max(20), locationId: z.string().nullable() });
+const ShotEditInput = z.object({ title: z.string().trim().min(1).max(200).optional(), section: z.string().trim().min(1).max(200).optional(), description: z.string().min(1).max(4000), action: z.string().min(1).max(2000), shotType: z.string().min(1).max(200), camera: z.string().min(1).max(500), mood: z.string().min(1).max(500), characterIds: z.array(z.string()).max(20), locationId: z.string().nullable() });
 app.put('/api/projects/:id/shots/:shotId', (req, res) => {
   const project = requireProject(req.params.id, res); if (!project) return;
   const input = ShotEditInput.parse(req.body);
@@ -412,8 +489,14 @@ app.put('/api/projects/:id/shots/:shotId', (req, res) => {
   if (!shot) return res.status(404).json({ error: 'Storyboard shot not found' });
   const identity = getVisualIdentity(req.params.id); const characters = new Set(identity.characters.map(item => item.id)); const locations = new Set(identity.locations.map(item => item.id));
   if (input.characterIds.some(id => !characters.has(id)) || (input.locationId && !locations.has(input.locationId))) return res.status(400).json({ error: 'Choose characters and locations from this project.' });
-  const changed = shot.description !== input.description || shot.action !== input.action || shot.shot_type !== input.shotType || shot.camera !== input.camera || shot.mood !== input.mood || shot.character_ids !== JSON.stringify(input.characterIds) || (shot.location_id ?? null) !== input.locationId;
-  db.prepare(`UPDATE shots SET description=?, action=?, shot_type=?, camera=?, mood=?, character_ids=?, location_id=?, generation_status=?, status=? WHERE id=?`).run(input.description, input.action, input.shotType, input.camera, input.mood, JSON.stringify(input.characterIds), input.locationId, changed && shot.image_url ? 'needs_regeneration' : shot.generation_status, changed && shot.image_url ? 'stale' : shot.status, shot.id);
+  const visualChanged = shot.description !== input.description || shot.action !== input.action || shot.shot_type !== input.shotType || shot.camera !== input.camera || shot.mood !== input.mood || shot.character_ids !== JSON.stringify(input.characterIds) || (shot.location_id ?? null) !== input.locationId;
+  db.transaction(() => {
+    db.prepare(`UPDATE shots SET title=?, section=?, description=?, action=?, shot_type=?, camera=?, mood=?, character_ids=?, location_id=?, generation_status=?, status=? WHERE id=?`).run(input.title ?? shot.title, input.section ?? shot.section, input.description, input.action, input.shotType, input.camera, input.mood, JSON.stringify(input.characterIds), input.locationId, visualChanged && shot.image_url ? 'needs_regeneration' : shot.generation_status, visualChanged && shot.image_url ? 'stale' : shot.status, shot.id);
+    if (visualChanged) {
+      db.prepare("UPDATE image_generations SET stale=1 WHERE shot_id=? AND tier='FINAL'").run(shot.id);
+      db.prepare("UPDATE image_assets SET stale=1 WHERE id IN (SELECT asset_id FROM image_generations WHERE shot_id=? AND tier='FINAL')").run(shot.id);
+    }
+  })();
   res.json(asShot(db.prepare('SELECT * FROM shots WHERE id = ?').get(shot.id)));
 });
 
@@ -442,7 +525,7 @@ app.post('/api/projects/:id/shots/:shotId/generate-image', async (req, res, next
     const shots = db.prepare('SELECT * FROM shots WHERE project_id=? ORDER BY position').all(project.id) as any[];
     const index = shots.findIndex(shot => shot.id === req.params.shotId);
     if (index < 0) return res.status(404).json({ error: 'Storyboard shot not found' });
-    const override = z.object({ qualityPreset: z.enum(['draft', 'standard', 'best']).optional(), platform:z.enum(['youtube','youtube-shorts','tiktok','spotify','landscape','vertical','square']).optional() }).parse(req.body ?? {});
+    const override = ImageTierOverrideInput.extend({ platform:z.enum(['youtube','youtube-shorts','tiktok','spotify','landscape','vertical','square']).optional() }).parse(req.body ?? {});
     await generateSingle(project, shots[index], shots[index - 1], override);
     res.json(asShot(db.prepare('SELECT * FROM shots WHERE id=?').get(req.params.shotId)));
   } catch (error) { next(error); }
@@ -450,10 +533,10 @@ app.post('/api/projects/:id/shots/:shotId/generate-image', async (req, res, next
 app.post('/api/projects/:id/shots/:shotId/generate-variants', async (req, res, next) => {
   try {
     const project = requireProject(req.params.id, res); if (!project) return;
-    const { count, qualityPreset } = ImageQualityOverrideInput.extend({ count: z.number().int().min(2).max(4) }).parse(req.body);
+    const { count, tier, qualityPreset } = ImageTierOverrideInput.extend({ count: z.number().int().min(2).max(4) }).parse(req.body);
     const shots = db.prepare('SELECT * FROM shots WHERE project_id=? ORDER BY position').all(project.id) as any[];
     const index = shots.findIndex(shot => shot.id === req.params.shotId); if (index < 0) return res.status(404).json({ error: 'Storyboard shot not found' });
-    for (let i=0;i<count;i++) await generateSingle(project, shots[index], shots[index - 1], { qualityPreset });
+    for (let i=0;i<count;i++) await generateSingle(project, shots[index], shots[index - 1], { tier: tier ?? 'DRAFT', qualityPreset });
     res.json(asShot(db.prepare('SELECT * FROM shots WHERE id=?').get(req.params.shotId)));
   } catch (error) { next(error); }
 });
@@ -521,16 +604,44 @@ app.post('/api/projects/:id/shots/bulk-review', (req, res) => {
 });
 app.post('/api/projects/:id/generate-images', async (req, res, next) => {
   try {
-    const body = ImageQualityOverrideInput.extend({ shotIds: z.array(z.string().min(1)).optional() }).parse(req.body ?? {});
+    const body = ImageTierOverrideInput.extend({ shotIds: z.array(z.string().min(1)).optional() }).parse(req.body ?? {});
     const project = requireProject(req.params.id, res); if (!project) return;
 
     const allShots = db.prepare('SELECT * FROM shots WHERE project_id = ? ORDER BY position').all(req.params.id) as any[];
     const hasExplicitSelection = Boolean(body.shotIds?.length);
     if (hasExplicitSelection && new Set(body.shotIds).size !== body.shotIds!.length) return res.status(400).json({ error: 'Each selected shot can only be included once.' });
-    const selected = hasExplicitSelection ? allShots.filter(s => body.shotIds!.includes(s.id)) : allShots.filter(s => s.generation_status !== 'generating' && (s.generation_status === 'needs_regeneration' || !listGenerations(s.id).some(generation => generation.active && generation.status === 'generated')));
+    const selected = hasExplicitSelection ? allShots.filter(s => body.shotIds!.includes(s.id)) : shotsMissingImages(project.id);
     if (hasExplicitSelection && selected.length !== body.shotIds!.length) return res.status(400).json({ error: 'One or more selected shots were not found in this project.' });
     if (selected.some(shot => shot.generation_status === 'generating')) return res.status(409).json({ error: 'Wait for the selected shots that are already generating, then try again.' });
-    res.status(202).json(startBatch(project, selected, { qualityPreset: body.qualityPreset }));
+    res.status(202).json(startBatch(project, selected, { tier: body.tier, qualityPreset: body.qualityPreset }));
+  } catch (error) { next(error); }
+});
+
+app.post('/api/projects/:id/image-generation-estimate', (req, res) => {
+  const project = requireProject(req.params.id, res); if (!project) return;
+  const input = z.object({ shotIds:z.array(z.string()).optional(), count:z.number().int().min(0).max(60).optional(), tier:z.enum(['DRAFT','STANDARD','FINAL']) }).parse(req.body ?? {});
+  const all = db.prepare('SELECT * FROM shots WHERE project_id=? ORDER BY position').all(project.id) as any[];
+  const selected = input.shotIds ? all.filter(shot => input.shotIds!.includes(shot.id)) : [];
+  res.json(generationEstimate(project, selected, input.tier as ImageTier, input.count ?? selected.length));
+});
+
+app.post('/api/projects/:id/shots/:shotId/render-final', async (req, res, next) => {
+  try {
+    const project = requireProject(req.params.id, res); if (!project) return;
+    const shots = db.prepare('SELECT * FROM shots WHERE project_id=? ORDER BY position').all(project.id) as any[];
+    const index = shots.findIndex(shot => shot.id === req.params.shotId); if (index < 0) return res.status(404).json({ error:'Storyboard shot not found.' });
+    if (shots[index].approval_status !== 'approved') return res.status(400).json({ error:'Approve the shot before rendering its final image.' });
+    const active = listGenerations(shots[index].id).find(item => item.active && item.status === 'generated');
+    if (active?.tier === 'FINAL' && !active.stale) return res.status(409).json({ error:'This shot already has a current Final image.' });
+    await generateSingle(project, shots[index], shots[index - 1], { tier:'FINAL', preserveApproval:true });
+    res.json(asShot(db.prepare('SELECT * FROM shots WHERE id=?').get(shots[index].id)));
+  } catch (error) { next(error); }
+});
+
+app.post('/api/projects/:id/render-approved-finals', (req, res, next) => {
+  try {
+    const project = requireProject(req.params.id, res); if (!project) return;
+    res.status(202).json(startBatch(project, approvedShotsNeedingFinal(project.id), { tier:'FINAL', preserveApproval:true }));
   } catch (error) { next(error); }
 });
 

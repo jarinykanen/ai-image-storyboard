@@ -29,7 +29,7 @@ export function ProjectCreationModal({ opened, loading, error, imageProviders, c
         <Textarea name="visualStyle" label="Visual direction" required minRows={3} placeholder="Describe the kind of video you want: dark cinematic story, dreamy summer road trip, surreal sci-fi, energetic performance video…" />
         <Group grow align="start" className="project-create-options">
           <Select name="aspectRatio" label="Format" defaultValue="16:9" data={['16:9', '9:16', '1:1']} />
-          <Select name="imageQualityPreset" label="Image quality" defaultValue="standard" data={[{ value: 'draft', label: 'Draft — cheapest, for storyboard previews' }, { value: 'standard', label: 'Standard — normal quality' }, { value: 'best', label: 'Best — highest quality, higher cost' }]} />
+          <Select name="imageQualityPreset" label="Generation tier" defaultValue="draft" data={[{ value: 'draft', label: 'Draft — cheapest, for iteration' }, { value: 'standard', label: 'Standard — balanced' }, { value: 'best', label: 'Final — highest quality, higher cost' }]} />
           <Select key={`${defaultImageProvider}-${configuredImageProviders.join('-')}`} name="imageProvider" label="Image provider" defaultValue={defaultImageProvider} disabled={!configuredImageProviders.length} data={imageProviders.map(provider => ({ value: provider, label: `${provider === 'openai' ? 'OpenAI' : 'xAI / Grok'}${!configuredImageProviders.includes(provider) ? ' — Not configured' : ''}`, disabled: !configuredImageProviders.includes(provider) }))} />
         </Group>
         {!canCreate && <Alert color="red">Connect an image provider in <Button type="button" variant="transparent" px={4} onClick={onOpenSettings}>Settings</Button> to create a project.</Alert>}

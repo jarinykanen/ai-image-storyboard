@@ -8,6 +8,7 @@ export type ProviderStatus = 'connected' | 'not_configured' | 'invalid_key' | 'r
 export type ProviderSettings = { configured: boolean; status: ProviderStatus; lastSuccessfulTestAt: string | null };
 export type ProviderAvailability = ProviderSettings & { capabilities: ProviderCapabilities };
 export type ImageQuality = 'draft' | 'standard' | 'best';
+export type ImageTier = 'DRAFT' | 'STANDARD' | 'FINAL';
 export type ImageResolution = '1024x1024' | '1024x1536' | '1536x1024' | '1k' | '2k';
 export type ImageModel = { provider: Provider; modelId: string; displayName: string; supportedQualities: ImageQuality[]; supportedResolutions: ImageResolution[]; referenceImageSupport: boolean; imageEditingSupport: boolean; maxReferenceImages: number; recommendedUse: string; estimatedCostUsd?: Partial<Record<ImageQuality, number>> };
 
@@ -25,18 +26,29 @@ export const imagePresets: Record<Provider, Record<ImageQuality, { modelId: stri
   openai: { draft: { modelId: 'gpt-image-1-mini', quality: 'draft' }, standard: { modelId: 'gpt-image-2', quality: 'standard' }, best: { modelId: 'gpt-image-2', quality: 'best' } },
   grok: { draft: { modelId: 'grok-imagine-image', quality: 'draft' }, standard: { modelId: 'grok-imagine-image-2.0', quality: 'standard' }, best: { modelId: 'grok-imagine-image-quality', quality: 'best' } },
 };
+export const tierToQuality: Record<ImageTier, ImageQuality> = { DRAFT: 'draft', STANDARD: 'standard', FINAL: 'best' };
+export const qualityToTier: Record<ImageQuality, ImageTier> = { draft: 'DRAFT', standard: 'STANDARD', best: 'FINAL' };
+export function normalizeImageTier(tier?: ImageTier, legacyQuality?: ImageQuality): ImageTier {
+  return tier ?? qualityToTier[legacyQuality ?? 'draft'];
+}
 export function modelsForProvider(provider: Provider, needsReferenceImages = false) { return imageModels.filter(model => model.provider === provider && (!needsReferenceImages || model.referenceImageSupport)); }
 export function findImageModel(provider: Provider, modelId: string | null | undefined, needsReferenceImages = false) { return modelsForProvider(provider, needsReferenceImages).find(model => model.modelId === modelId); }
 export function resolveImageConfiguration(input: { provider: Provider; preset?: ImageQuality; modelId?: string | null; resolution?: ImageResolution | null; needsReferenceImages?: boolean }) {
   const preset = input.preset ?? 'standard';
   const fallback = imagePresets[input.provider][preset];
-  let model = findImageModel(input.provider, input.modelId, input.needsReferenceImages)
+  let model = findImageModel(input.provider, input.modelId, input.needsReferenceImages);
+  if (model && !model.supportedQualities.includes(preset)) model = undefined;
+  model = model
     ?? findImageModel(input.provider, fallback.modelId, input.needsReferenceImages)
     ?? modelsForProvider(input.provider, input.needsReferenceImages)[0];
   if (!model) throw new ProviderCapabilityError(input.provider, 'referenceImages');
   const quality = model.supportedQualities.includes(preset) ? preset : model.supportedQualities[model.supportedQualities.length - 1];
   const resolution = model.supportedResolutions.includes(input.resolution as ImageResolution) ? input.resolution as ImageResolution : model.supportedResolutions[0];
   return { provider: input.provider, model, quality, resolution, estimatedCostUsd: model.estimatedCostUsd?.[quality] };
+}
+export function resolveTierConfiguration(input: { provider: Provider; tier?: ImageTier; legacyQuality?: ImageQuality; modelId?: string | null; resolution?: ImageResolution | null; needsReferenceImages?: boolean }) {
+  const tier = normalizeImageTier(input.tier, input.legacyQuality);
+  return { tier, ...resolveImageConfiguration({ provider: input.provider, preset: tierToQuality[tier], modelId: input.modelId, resolution: input.resolution, needsReferenceImages: input.needsReferenceImages }) };
 }
 
 const providers: Record<Provider, { name: string; capabilities: ProviderCapabilities }> = {

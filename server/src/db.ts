@@ -193,11 +193,14 @@ if (!generationColumns.has('resolution')) db.exec("ALTER TABLE image_generations
 if (!generationColumns.has('asset_id')) db.exec('ALTER TABLE image_generations ADD COLUMN asset_id TEXT');
 if (!generationColumns.has('source')) db.exec("ALTER TABLE image_generations ADD COLUMN source TEXT NOT NULL DEFAULT 'generated'");
 if (!generationColumns.has('original_filename')) db.exec('ALTER TABLE image_generations ADD COLUMN original_filename TEXT');
+if (!generationColumns.has('tier')) db.exec('ALTER TABLE image_generations ADD COLUMN tier TEXT');
+if (!generationColumns.has('stale')) db.exec('ALTER TABLE image_generations ADD COLUMN stale INTEGER NOT NULL DEFAULT 0');
+db.prepare("UPDATE image_generations SET tier=CASE quality WHEN 'draft' THEN 'DRAFT' WHEN 'best' THEN 'FINAL' ELSE 'STANDARD' END WHERE tier IS NULL AND source='generated'").run();
 db.prepare("UPDATE image_generations SET approved=1 WHERE active=1 AND shot_id IN (SELECT id FROM shots WHERE approval_status='approved')").run();
 
 const projectColumns = new Set((db.prepare('PRAGMA table_info(projects)').all() as { name: string }[]).map(column => column.name));
 const addProjectColumn = (name: string, definition: string) => { if (!projectColumns.has(name)) db.exec(`ALTER TABLE projects ADD COLUMN ${name} ${definition}`); };
-addProjectColumn('image_quality_preset', "TEXT NOT NULL DEFAULT 'standard'");
+addProjectColumn('image_quality_preset', "TEXT NOT NULL DEFAULT 'draft'");
 addProjectColumn('image_model_override', 'TEXT');
 addProjectColumn('image_resolution_override', 'TEXT');
 addProjectColumn('suno_description', 'TEXT');
@@ -222,6 +225,10 @@ if (!assetSql.includes("'artwork'")) {
     CREATE INDEX IF NOT EXISTS image_assets_owner_version ON image_assets(owner_type, owner_id, version);
     CREATE UNIQUE INDEX IF NOT EXISTS image_assets_one_active ON image_assets(owner_type, owner_id) WHERE active = 1;`);
 }
+const currentAssetColumns = new Set((db.prepare('PRAGMA table_info(image_assets)').all() as { name:string }[]).map(column=>column.name));
+if (!currentAssetColumns.has('tier')) db.exec('ALTER TABLE image_assets ADD COLUMN tier TEXT');
+if (!currentAssetColumns.has('stale')) db.exec('ALTER TABLE image_assets ADD COLUMN stale INTEGER NOT NULL DEFAULT 0');
+db.prepare("UPDATE image_assets SET tier=CASE quality WHEN 'draft' THEN 'DRAFT' WHEN 'best' THEN 'FINAL' ELSE 'STANDARD' END WHERE tier IS NULL AND source='generated'").run();
 
 // Reference images are intentionally retained after copy edits. These snapshots
 // let the UI indicate when the retained image no longer represents the text.

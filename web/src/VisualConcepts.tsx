@@ -5,7 +5,7 @@ import { Alert, Badge, Button, FileButton, Group, Paper, Select, Stack, Text, Te
 import { ConfirmModal } from './ConfirmModal';
 import { ImageGenerationModal, type ImageQuality } from './ImageGenerationModal';
 
-export type VisualConcept = { id: string; title: string; description: string; mood: string; visualStyle: string; colorAndLighting: string; narrativeDirection: string; referenceImageUrl: string | null; status: 'generating' | 'generated' | 'selected' | 'failed'; imageStatus: 'pending' | 'generating' | 'generated' | 'failed'; source: 'ai' | 'manual'; imageOutdated: boolean; imageAssets:{id:string;active:boolean}[] };
+export type VisualConcept = { id: string; title: string; description: string; mood: string; visualStyle: string; colorAndLighting: string; narrativeDirection: string; referenceImageUrl: string | null; status: 'generating' | 'generated' | 'selected' | 'failed'; imageStatus: 'pending' | 'generating' | 'generated' | 'failed'; source: 'ai' | 'manual'; imageOutdated: boolean; imageAssets:{id:string;active:boolean;tier?:'DRAFT'|'STANDARD'|'FINAL'|null}[] };
 type ConceptFields = Pick<VisualConcept, 'title' | 'description' | 'mood' | 'visualStyle' | 'colorAndLighting' | 'narrativeDirection'>;
 type Props = { projectId: string; concepts: VisualConcept[]; defaultQuality: ImageQuality; onRefresh: () => Promise<void> };
 const API = 'http://localhost:3001/api';
@@ -44,6 +44,7 @@ function EmptyConceptPreview({ concept, busy, onUpload }: { concept: VisualConce
   return <div className="empty-concept-preview">
     <span className="empty-preview-icon" aria-hidden="true">▧</span>
     <Text size="sm" c="dimmed">{generating ? 'Creating preview image…' : concept.imageStatus === 'failed' ? 'Preview image could not be created' : 'No preview image yet'}</Text>
+    <Text size="xs" c="dimmed">Already have an image from ChatGPT, Grok, or another tool? Upload it here instead.</Text>
     <FileButton accept="image/jpeg,image/png,image/webp" disabled={busy || generating} onChange={file => { if (file) onUpload(file); }}>
       {props => <Button variant="default" size="sm" {...props}>Upload preview image</Button>}
     </FileButton>
@@ -122,7 +123,7 @@ function ConceptEditView({ projectId, concept, defaultQuality, onRefresh, onBack
         {concept.imageOutdated && <Alert color="yellow">The concept has changed since this preview image was created.</Alert>}
         {concept.imageStatus === 'failed' && <Alert color="red">The preview image could not be created. You can try again or upload your own.</Alert>}
         <Stack gap="sm">
-          <div><Text fw={600}>Preview image</Text><Text size="sm" c="dimmed">Generate one image, create variants, or upload your own reference.</Text></div>
+          <div><Text fw={600}>Preview image</Text><Text size="sm" c="dimmed">Already have an image from ChatGPT, Grok, or another tool? Upload it here instead.</Text></div>
           <Group gap="sm">
             <Button variant="default" disabled={busy || concept.imageStatus === 'generating'} onClick={() => setConfirmAction('image')}>{concept.referenceImageUrl ? 'Regenerate image' : 'Generate preview image'}</Button>
             <FileButton accept="image/jpeg,image/png,image/webp" disabled={busy} onChange={file => { if (file) void run(() => upload(`${base}/upload`, file)); }}>
@@ -154,8 +155,8 @@ function ConceptEditView({ projectId, concept, defaultQuality, onRefresh, onBack
       </Paper>
     </div>
 
-    <ImageGenerationModal opened={confirmAction === 'image'} defaultQuality={defaultQuality} title={concept.referenceImageUrl ? 'Regenerate preview image?' : 'Generate preview image?'} message="Generate 1 preview image? This is a paid generation action." confirmLabel="Generate 1 image" loading={busy} onCancel={() => setConfirmAction(null)} onConfirm={generateImage} />
-    <ImageGenerationModal opened={confirmAction === 'variants'} defaultQuality={defaultQuality} title="Generate preview variants?" message={`Generate ${variantCount} preview images? This is a paid generation action.`} confirmLabel={`Generate ${variantCount} images`} loading={busy} onCancel={() => setConfirmAction(null)} onConfirm={generateVariants} />
+    <ImageGenerationModal opened={confirmAction === 'image'} projectId={projectId} imageCount={1} defaultQuality={activeAsset?.tier==='FINAL'?'best':activeAsset?.tier==='STANDARD'?'standard':'draft'} title={concept.referenceImageUrl ? 'Regenerate preview image?' : 'Generate preview image?'} message="Generate 1 preview image as a new version? This is a paid generation action." confirmLabel="Generate 1 image" loading={busy} onCancel={() => setConfirmAction(null)} onConfirm={generateImage} />
+    <ImageGenerationModal opened={confirmAction === 'variants'} projectId={projectId} imageCount={Number(variantCount)} defaultQuality="draft" title="Generate preview variants?" message={`Generate ${variantCount} Draft preview images? Variants start in Draft to keep iteration inexpensive.`} confirmLabel={`Generate ${variantCount} images`} loading={busy} onCancel={() => setConfirmAction(null)} onConfirm={generateVariants} />
     <ConfirmModal opened={confirmAction === 'text'} title="Regenerate concept text?" message="Replace this concept's current text with a newly generated direction? Its existing preview image will be marked as outdated." confirmLabel="Regenerate concept" loading={busy} onCancel={() => setConfirmAction(null)} onConfirm={regenerateText} />
     <ConfirmModal opened={confirmAction === 'delete'} title="Delete concept?" message={`Delete ${concept.title}? This cannot be undone.`} confirmLabel="Delete" confirmColor="red" loading={busy} onCancel={() => setConfirmAction(null)} onConfirm={deleteConcept} />
   </>;
