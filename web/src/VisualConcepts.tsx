@@ -3,10 +3,11 @@ import './concepts.css';
 import { WorkspaceHeader } from './AppLayout';
 import { Alert, Badge, Button, FileButton, Group, Paper, Select, Stack, Text, Textarea } from '@mantine/core';
 import { ConfirmModal } from './ConfirmModal';
+import { ImageGenerationModal, type ImageQuality } from './ImageGenerationModal';
 
 export type VisualConcept = { id: string; title: string; description: string; mood: string; visualStyle: string; colorAndLighting: string; narrativeDirection: string; referenceImageUrl: string | null; status: 'generating' | 'generated' | 'selected' | 'failed'; imageStatus: 'pending' | 'generating' | 'generated' | 'failed'; source: 'ai' | 'manual'; imageOutdated: boolean; imageAssets:{id:string;active:boolean}[] };
 type ConceptFields = Pick<VisualConcept, 'title' | 'description' | 'mood' | 'visualStyle' | 'colorAndLighting' | 'narrativeDirection'>;
-type Props = { projectId: string; concepts: VisualConcept[]; onRefresh: () => Promise<void> };
+type Props = { projectId: string; concepts: VisualConcept[]; defaultQuality: ImageQuality; onRefresh: () => Promise<void> };
 const API = 'http://localhost:3001/api';
 const emptyConcept: ConceptFields = { title: '', description: '', mood: '', visualStyle: '', colorAndLighting: '', narrativeDirection: '' };
 
@@ -82,11 +83,11 @@ function ConceptCard({ projectId, concept, onRefresh, onEdit }: { projectId: str
   </article>;
 }
 
-function ConceptEditView({ projectId, concept, onRefresh, onBack }: { projectId: string; concept: VisualConcept; onRefresh: () => Promise<void>; onBack: () => void }) {
+function ConceptEditView({ projectId, concept, defaultQuality, onRefresh, onBack }: { projectId: string; concept: VisualConcept; defaultQuality: ImageQuality; onRefresh: () => Promise<void>; onBack: () => void }) {
   const [form, setForm] = useState<ConceptFields>(() => conceptFields(concept));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [confirmAction, setConfirmAction] = useState<'image' | 'variants' | 'delete' | null>(null);
+  const [confirmAction, setConfirmAction] = useState<'image' | 'variants' | 'text' | 'delete' | null>(null);
   const [variantCount, setVariantCount] = useState('3');
   const base = `/projects/${projectId}/concepts/${concept.id}`;
   const valid = Object.values(form).every(value => value.trim());
@@ -108,9 +109,9 @@ function ConceptEditView({ projectId, concept, onRefresh, onBack }: { projectId:
   const regenerateText = () => void run(async () => {
     const result = await request(`${base}/regenerate`) as { concept: VisualConcept };
     setForm(conceptFields(result.concept));
-  });
-  const generateImage = () => void run(() => request(`${base}/image`)).finally(() => setConfirmAction(null));
-  const generateVariants = () => void run(() => request(`${base}/generate-variants`, 'POST', { count: Number(variantCount) })).finally(() => setConfirmAction(null));
+  }).finally(() => setConfirmAction(null));
+  const generateImage = (qualityPreset: ImageQuality) => void run(() => request(`${base}/image`, 'POST', { qualityPreset })).finally(() => setConfirmAction(null));
+  const generateVariants = (qualityPreset: ImageQuality) => void run(() => request(`${base}/generate-variants`, 'POST', { count: Number(variantCount), qualityPreset })).finally(() => setConfirmAction(null));
   const deleteConcept = () => void run(() => request(base, 'DELETE')).then(success => { if (success) onBack(); }).finally(() => setConfirmAction(null));
 
   return <>
@@ -146,38 +147,41 @@ function ConceptEditView({ projectId, concept, onRefresh, onBack }: { projectId:
             <Button variant="default" disabled={busy || !dirty} onClick={() => setForm(conceptFields(concept))}>Cancel changes</Button>
           </Group>
           <div className="concept-edit-secondary-actions">
-            {concept.source === 'ai' && <Button variant="default" disabled={busy} onClick={regenerateText}>Regenerate concept text</Button>}
+            {concept.source === 'ai' && <Button variant="default" disabled={busy} onClick={() => setConfirmAction('text')}>Regenerate concept text</Button>}
             <Button color="red" variant="light" disabled={busy} onClick={() => setConfirmAction('delete')}>Delete concept</Button>
           </div>
         </Stack>
       </Paper>
     </div>
 
-    <ConfirmModal opened={confirmAction === 'image'} title={concept.referenceImageUrl ? 'Regenerate preview image?' : 'Generate preview image?'} message="Generate 1 preview image? This is a paid generation action." confirmLabel="Generate 1 image" loading={busy} onCancel={() => setConfirmAction(null)} onConfirm={generateImage} />
-    <ConfirmModal opened={confirmAction === 'variants'} title="Generate preview variants?" message={`Generate ${variantCount} preview images? This is a paid generation action.`} confirmLabel={`Generate ${variantCount} images`} loading={busy} onCancel={() => setConfirmAction(null)} onConfirm={generateVariants} />
+    <ImageGenerationModal opened={confirmAction === 'image'} defaultQuality={defaultQuality} title={concept.referenceImageUrl ? 'Regenerate preview image?' : 'Generate preview image?'} message="Generate 1 preview image? This is a paid generation action." confirmLabel="Generate 1 image" loading={busy} onCancel={() => setConfirmAction(null)} onConfirm={generateImage} />
+    <ImageGenerationModal opened={confirmAction === 'variants'} defaultQuality={defaultQuality} title="Generate preview variants?" message={`Generate ${variantCount} preview images? This is a paid generation action.`} confirmLabel={`Generate ${variantCount} images`} loading={busy} onCancel={() => setConfirmAction(null)} onConfirm={generateVariants} />
+    <ConfirmModal opened={confirmAction === 'text'} title="Regenerate concept text?" message="Replace this concept's current text with a newly generated direction? Its existing preview image will be marked as outdated." confirmLabel="Regenerate concept" loading={busy} onCancel={() => setConfirmAction(null)} onConfirm={regenerateText} />
     <ConfirmModal opened={confirmAction === 'delete'} title="Delete concept?" message={`Delete ${concept.title}? This cannot be undone.`} confirmLabel="Delete" confirmColor="red" loading={busy} onCancel={() => setConfirmAction(null)} onConfirm={deleteConcept} />
   </>;
 }
 
-export function VisualConcepts({ projectId, concepts, onRefresh }: Props) {
+export function VisualConcepts({ projectId, concepts, defaultQuality, onRefresh }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [creating, setCreating] = useState(false);
+  const [confirmingGeneration, setConfirmingGeneration] = useState(false);
   const [form, setForm] = useState<ConceptFields>(emptyConcept);
   const [editingId, setEditingId] = useState<string | null>(null);
   const run = async (action: () => Promise<unknown>) => { setBusy(true); setError(''); try { await action(); await onRefresh(); } catch (e) { setError(e instanceof Error ? e.message : 'Could not complete that action.'); } finally { setBusy(false); } };
-  const generateAll = () => run(() => request(`/projects/${projectId}/concepts/generate`));
+  const generateAll = () => void run(() => request(`/projects/${projectId}/concepts/generate`)).finally(() => setConfirmingGeneration(false));
   const saveManual = () => run(async () => { await request(`/projects/${projectId}/concepts`, 'POST', form); setForm(emptyConcept); setCreating(false); });
   const valid = Object.values(form).every(value => value.trim());
   const editingConcept = concepts.find(concept => concept.id === editingId);
 
-  if (editingConcept) return <ConceptEditView key={editingConcept.id} projectId={projectId} concept={editingConcept} onRefresh={onRefresh} onBack={() => setEditingId(null)} />;
+  if (editingConcept) return <ConceptEditView key={editingConcept.id} projectId={projectId} concept={editingConcept} defaultQuality={defaultQuality} onRefresh={onRefresh} onBack={() => setEditingId(null)} />;
 
   return <>
-    <WorkspaceHeader title="Concepts" description="Choose a creative direction for the video. Text concepts never use image-generation credits." actions={<><Button variant="default" onClick={() => setCreating(true)} disabled={busy}>+ Create my own</Button><Button onClick={generateAll} disabled={busy}>Generate 3 concepts</Button></>} />
+    <WorkspaceHeader title="Concepts" description="Choose a creative direction for the video. Text concepts never use image-generation credits." actions={<><Button variant="default" onClick={() => setCreating(true)} disabled={busy}>+ Create my own</Button><Button onClick={() => setConfirmingGeneration(true)} disabled={busy}>Generate 3 concepts</Button></>} />
     {busy && <div className="notice">Creating text concepts…</div>}{error && <div className="inline-error notice">{error}</div>}
-    {!concepts.length && !creating && <section className="panel empty-concepts"><h2>Start with a creative direction</h2><p>Generate three AI text concepts, or define your own. You can add more concepts later.</p><div className="card-actions"><Button disabled={busy} onClick={generateAll}>Generate 3 concepts with AI</Button><Button variant="default" disabled={busy} onClick={() => setCreating(true)}>+ Create my own concept</Button></div></section>}
+    {!concepts.length && !creating && <section className="panel empty-concepts"><h2>Start with a creative direction</h2><p>Generate three AI text concepts, or define your own. You can add more concepts later.</p><div className="card-actions"><Button disabled={busy} onClick={() => setConfirmingGeneration(true)}>Generate 3 concepts with AI</Button><Button variant="default" disabled={busy} onClick={() => setCreating(true)}>+ Create my own concept</Button></div></section>}
     {creating && <section className="panel manual-concept"><h2>Create my own concept</h2><ConceptForm value={form} onChange={setForm} /><div className="card-actions"><Button disabled={busy || !valid} onClick={saveManual}>Create concept</Button><Button variant="default" disabled={busy} onClick={() => { setForm(emptyConcept); setCreating(false); }}>Cancel</Button></div></section>}
     <section className="concept-grid">{concepts.map(concept => <ConceptCard key={concept.id} projectId={projectId} concept={concept} onRefresh={onRefresh} onEdit={() => setEditingId(concept.id)} />)}</section>
+    <ConfirmModal opened={confirmingGeneration} title="Generate visual concepts?" message="Generate 3 new text concepts? Existing AI-generated concepts will be replaced; manually created concepts will be kept. This does not use image-generation credits." confirmLabel="Generate 3 concepts" loading={busy} onCancel={() => setConfirmingGeneration(false)} onConfirm={generateAll} />
   </>;
 }

@@ -14,6 +14,10 @@
 /* Consolidated desktop UI polish */
 .workspace-main .project-details,.workspace-main .artwork-page .panel{width:100%!important;max-width:none!important}
 
+/* Artwork previews and source selection */
+.artwork-page .comparison-grid{min-width:0}.artwork-page .comparison-image{min-width:0;overflow:hidden}.artwork-page .comparison-image img{display:block;width:100%;max-width:100%;height:auto;object-fit:contain}.storyboard-source-scroller{display:grid;grid-auto-columns:160px;grid-auto-flow:column;gap:10px;overflow-x:auto;overscroll-behavior-x:contain;padding:14px 0 4px;scrollbar-gutter:stable}.storyboard-source-button{height:auto!important;min-width:0;padding:7px!important;text-align:left}.storyboard-source-content{display:grid;gap:6px;min-width:0;width:100%}.storyboard-source-content img{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:5px}
+.artwork-text-controls{padding:16px;border:1px solid var(--mantine-color-dark-4);border-radius:var(--mantine-radius-md);background:var(--mantine-color-dark-7)}
+
 /* Project library */
 .project-table{width:100%;overflow:hidden;background:#202121;border-color:#3a3b3b}.project-table th{color:#aaa;font-size:12px;text-transform:uppercase;letter-spacing:.06em}.project-table td{border-color:#343636}.project-actions-column{width:110px;text-align:right!important}.empty-projects{max-width:720px}.project-create-options{flex-wrap:nowrap}
 @media(max-width:760px){.project-create-options{align-items:stretch!important;flex-direction:column}.project-create-options>*{width:100%}.global-nav{padding:0 16px}}

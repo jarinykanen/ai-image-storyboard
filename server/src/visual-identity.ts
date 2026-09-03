@@ -5,6 +5,7 @@ import { getSelectedConcept } from './visual-concepts.js';
 import { buildSelectedConceptContext } from './visual-concept-prompts.js';
 import { buildSongContext } from './song-context.js';
 import { activateAsset, createGeneratedAsset, createUploadedAsset, listAssets } from './assets.js';
+import type { ImageQuality } from './provider-settings.js';
 
 export type ReferenceType = 'character' | 'location';
 
@@ -71,7 +72,7 @@ export function setVisualLock(projectId: string, target: 'style' | ReferenceType
     .run(Number(locked), referenceId, projectId, target).changes > 0;
 }
 
-export async function generateVisualReference(project: { id: string; image_provider: ImageProvider; aspect_ratio: string; lyrics?: string; suno_description?: string | null }, target: 'style' | ReferenceType, referenceId?: string) {
+export async function generateVisualReference(project: { id: string; image_provider: ImageProvider; aspect_ratio: string; lyrics?: string; suno_description?: string | null }, target: 'style' | ReferenceType, referenceId?: string, qualityPreset?: ImageQuality) {
   const identity = getVisualIdentity(project.id);
   const conceptContext = buildSelectedConceptContext(getSelectedConcept(project.id));
   const songContext = buildSongContext(project);
@@ -89,7 +90,7 @@ export async function generateVisualReference(project: { id: string; image_provi
       : `Create a consistent location reference image for ${reference.name}. ${reference.description}. Visual style: ${identity.style.description || 'cinematic music video'}.${conceptContext} ${songContext} Do not include text, captions, logos, or watermarks.`;
   }
   const style = { id: 'visual-style', type: 'style' as const, name: 'Visual Style', description: identity.style.description, imageAsset: identity.style.image_url, locked: identity.style.locked, stale: identity.style.image_outdated };
-  const result = await generateImage(project.image_provider, { projectId: project.id, shotId: `reference:${referenceId || 'style'}`, aspectRatio: project.aspect_ratio, visualStyle: identity.style.description, concept: null, description: prompt, action: '', shotType: 'reference image', camera: '', mood: '', characters: [], location: null, previousShot: null, referenceContext: { style, characters: [], location: null, continuityReference: null }, generationInstructions: '', prompt, qualityPreset: (project as any).image_quality_preset, modelOverride: (project as any).image_model_override, resolutionOverride: (project as any).image_resolution_override });
+  const result = await generateImage(project.image_provider, { projectId: project.id, shotId: `reference:${referenceId || 'style'}`, aspectRatio: project.aspect_ratio, visualStyle: identity.style.description, concept: null, description: prompt, action: '', shotType: 'reference image', camera: '', mood: '', characters: [], location: null, previousShot: null, referenceContext: { style, characters: [], location: null, continuityReference: null }, generationInstructions: '', prompt, qualityPreset: qualityPreset ?? (project as any).image_quality_preset, modelOverride: (project as any).image_model_override, resolutionOverride: (project as any).image_resolution_override });
   const ownerType = target === 'style' ? 'style' as const : 'reference' as const;
   const ownerId = target === 'style' ? project.id : referenceId!;
   const asset = await createGeneratedAsset({ projectId:project.id, ownerType, ownerId, url:result.url, provider:project.image_provider, model:result.model, quality:result.quality, resolution:result.resolution });

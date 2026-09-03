@@ -30,7 +30,9 @@ export function findImageModel(provider: Provider, modelId: string | null | unde
 export function resolveImageConfiguration(input: { provider: Provider; preset?: ImageQuality; modelId?: string | null; resolution?: ImageResolution | null; needsReferenceImages?: boolean }) {
   const preset = input.preset ?? 'standard';
   const fallback = imagePresets[input.provider][preset];
-  let model = findImageModel(input.provider, input.modelId, input.needsReferenceImages) ?? findImageModel(input.provider, fallback.modelId, input.needsReferenceImages);
+  let model = findImageModel(input.provider, input.modelId, input.needsReferenceImages)
+    ?? findImageModel(input.provider, fallback.modelId, input.needsReferenceImages)
+    ?? modelsForProvider(input.provider, input.needsReferenceImages)[0];
   if (!model) throw new ProviderCapabilityError(input.provider, 'referenceImages');
   const quality = model.supportedQualities.includes(preset) ? preset : model.supportedQualities[model.supportedQualities.length - 1];
   const resolution = model.supportedResolutions.includes(input.resolution as ImageResolution) ? input.resolution as ImageResolution : model.supportedResolutions[0];

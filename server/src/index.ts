@@ -35,6 +35,7 @@ const ProjectInput = z.object({
   imageProvider: z.enum(['openai', 'grok']),
   imageQualityPreset: z.enum(['draft', 'standard', 'best']).default('standard'),
 });
+const ImageQualityOverrideInput = z.object({ qualityPreset: z.enum(['draft', 'standard', 'best']).optional() });
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
@@ -104,7 +105,8 @@ app.get('/api/platform-presets', (_req,res) => res.json(allPlatformPresets));
 const PublishingInput = z.object({ publishingTargets:z.array(z.enum(['youtube','youtube-shorts','tiktok','spotify','landscape','vertical','square'])).max(7), primaryVisualFormat:z.enum(['youtube','youtube-shorts','tiktok','spotify','landscape','vertical','square']) });
 app.put('/api/projects/:id/publishing', (req,res) => { const project=requireProject(req.params.id,res); if(!project)return; const input=PublishingInput.parse(req.body); if(input.publishingTargets.length && !input.publishingTargets.includes(input.primaryVisualFormat)) return res.status(400).json({error:'Primary visual format must be one of the selected publishing targets.'}); db.prepare('UPDATE projects SET publishing_targets=?,primary_visual_format=? WHERE id=?').run(JSON.stringify(input.publishingTargets),input.primaryVisualFormat,project.id); res.json(requireProject(project.id,res)); });
 app.get('/api/projects/:id/artwork', (req,res) => { if(!requireProject(req.params.id,res))return; res.json(listArtwork(req.params.id)); });
-const ArtworkInput=z.object({platform:z.enum(['youtube','youtube-shorts','tiktok','spotify','landscape','vertical','square']),count:z.number().int().min(2).max(4),strategy:z.enum(['Cinematic','Character focused','Dramatic','Minimal','Mysterious','High contrast','Custom']).default('Cinematic'),focus:z.enum(['Automatic','Main character','Story / mystery','Key object / motif','Environment','Custom']).default('Automatic'),text:z.string().max(160).default(''),subtitle:z.string().max(160).default('')});
+const ArtworkTextConfig=z.object({title:z.string().max(80).default(''),subtitle:z.string().max(120).default(''),style:z.enum(['Bold impact','Neon glow','Elegant serif','Handwritten','Clean minimal']).default('Bold impact'),mood:z.enum(['Energetic','Romantic','Dark','Dreamy','Epic']).default('Epic')});
+const ArtworkInput=z.object({platform:z.enum(['youtube','youtube-shorts','tiktok','spotify','landscape','vertical','square']),count:z.number().int().min(2).max(4),strategy:z.enum(['Cinematic','Character focused','Dramatic','Minimal','Mysterious','High contrast','Custom']).default('Cinematic'),focus:z.enum(['Automatic','Main character','Story / mystery','Key object / motif','Environment','Custom']).default('Automatic'),customStylePrompt:z.string().trim().max(2000).default(''),text:z.string().max(160).default(''),subtitle:z.string().max(160).default(''),textConfig:ArtworkTextConfig.optional(),qualityPreset:z.enum(['draft','standard','best']).optional()});
 app.post('/api/projects/:id/artwork/generate', async(req,res,next)=>{try{const project=requireProject(req.params.id,res);if(!project)return;res.status(201).json(await generateArtwork(project,ArtworkInput.parse(req.body)));}catch(error){next(error);}});
 app.post('/api/projects/:id/artwork/upload', upload.single('image'), (req,res,next)=>{try{const projectId=String(req.params.id);if(!requireProject(projectId,res))return;const platform=z.enum(['youtube','youtube-shorts','tiktok','spotify','landscape','vertical','square']).parse(req.body.platform);if(!req.file)return res.status(400).json({error:'Choose an image to upload.'});res.status(201).json(uploadArtwork(projectId,platform,req.file));}catch(error){next(error);}});
 app.post('/api/projects/:id/artwork/from-source', (req,res,next)=>{try{if(!requireProject(req.params.id,res))return;const input=z.object({platform:z.enum(['youtube','youtube-shorts','tiktok','spotify','landscape','vertical','square']),assetId:z.string().min(1)}).parse(req.body);res.status(201).json(useSourceAsArtwork(req.params.id,input.platform,input.assetId));}catch(error){next(error);}});
@@ -225,17 +227,19 @@ app.post('/api/projects/:id/concepts/:conceptId/regenerate', async (req, res, ne
 app.post('/api/projects/:id/concepts/:conceptId/generate-image', async (req, res, next) => {
   try {
     const project = requireProject(req.params.id, res); if (!project) return;
-    res.json({ image_url: await generateConceptImage(project, req.params.conceptId) });
+    const { qualityPreset } = ImageQualityOverrideInput.parse(req.body ?? {});
+    res.json({ image_url: await generateConceptImage(project, req.params.conceptId, qualityPreset) });
   } catch (error) { next(error); }
 });
 app.post('/api/projects/:id/concepts/:conceptId/image', async (req, res, next) => {
   try {
     const project = requireProject(req.params.id, res); if (!project) return;
-    res.json({ image_url: await generateConceptImage(project, req.params.conceptId) });
+    const { qualityPreset } = ImageQualityOverrideInput.parse(req.body ?? {});
+    res.json({ image_url: await generateConceptImage(project, req.params.conceptId, qualityPreset) });
   } catch (error) { next(error); }
 });
 app.post('/api/projects/:id/concepts/:conceptId/generate-variants', async (req, res, next) => {
-  try { const project=requireProject(req.params.id,res); if(!project)return; const {count}=z.object({count:z.number().int().min(2).max(4)}).parse(req.body); for(let i=0;i<count;i++) await generateConceptImage(project,req.params.conceptId); res.json({concept:getConcepts(project.id).find(item=>item.id===req.params.conceptId)}); } catch(error){next(error);} 
+  try { const project=requireProject(req.params.id,res); if(!project)return; const {count,qualityPreset}=ImageQualityOverrideInput.extend({count:z.number().int().min(2).max(4)}).parse(req.body); for(let i=0;i<count;i++) await generateConceptImage(project,req.params.conceptId,qualityPreset); res.json({concept:getConcepts(project.id).find(item=>item.id===req.params.conceptId)}); } catch(error){next(error);}
 });
 app.post('/api/projects/:id/concepts/:conceptId/upload', upload.single('image'), (req,res) => { const projectId=String(req.params.id),conceptId=String(req.params.conceptId); if(!requireProject(projectId,res)) return; if(!req.file) return res.status(400).json({error:'Choose an image to upload.'}); const asset=uploadConceptImage(projectId,conceptId,req.file); if(!asset)return res.status(404).json({error:'Visual concept not found.'}); res.status(201).json({asset}); });
 
@@ -279,22 +283,24 @@ app.post('/api/projects/:id/visual-identity/:type/:referenceId/image', async (re
   try {
     const project = requireProject(req.params.id, res); if (!project) return;
     const type = referenceType.parse(req.params.type);
-    const imageUrl = await generateVisualReference(project, type, req.params.referenceId);
+    const { qualityPreset } = ImageQualityOverrideInput.parse(req.body ?? {});
+    const imageUrl = await generateVisualReference(project, type, req.params.referenceId, qualityPreset);
     res.json({ image_url: imageUrl });
   } catch (error) { next(error); }
 });
 app.post('/api/projects/:id/visual-identity/style/image', async (req, res, next) => {
   try {
     const project = requireProject(req.params.id, res); if (!project) return;
-    const imageUrl = await generateVisualReference(project, 'style');
+    const { qualityPreset } = ImageQualityOverrideInput.parse(req.body ?? {});
+    const imageUrl = await generateVisualReference(project, 'style', undefined, qualityPreset);
     res.json({ image_url: imageUrl });
   } catch (error) { next(error); }
 });
 app.post('/api/projects/:id/visual-identity/style/generate-variants', async (req,res,next)=>{
-  try { const project=requireProject(req.params.id,res);if(!project)return;const {count}=z.object({count:z.number().int().min(2).max(4)}).parse(req.body);for(let i=0;i<count;i++)await generateVisualReference(project,'style');res.json(getVisualIdentity(project.id).style); } catch(error){next(error);}
+  try { const project=requireProject(req.params.id,res);if(!project)return;const {count,qualityPreset}=ImageQualityOverrideInput.extend({count:z.number().int().min(2).max(4)}).parse(req.body);for(let i=0;i<count;i++)await generateVisualReference(project,'style',undefined,qualityPreset);res.json(getVisualIdentity(project.id).style); } catch(error){next(error);}
 });
 app.post('/api/projects/:id/visual-identity/:type/:referenceId/generate-variants', async (req,res,next)=>{
-  try { const project=requireProject(req.params.id,res);if(!project)return;const type=referenceType.parse(req.params.type);const {count}=z.object({count:z.number().int().min(2).max(4)}).parse(req.body);for(let i=0;i<count;i++)await generateVisualReference(project,type,req.params.referenceId);res.json(getVisualIdentity(project.id)); } catch(error){next(error);}
+  try { const project=requireProject(req.params.id,res);if(!project)return;const type=referenceType.parse(req.params.type);const {count,qualityPreset}=ImageQualityOverrideInput.extend({count:z.number().int().min(2).max(4)}).parse(req.body);for(let i=0;i<count;i++)await generateVisualReference(project,type,req.params.referenceId,qualityPreset);res.json(getVisualIdentity(project.id)); } catch(error){next(error);}
 });
 app.post('/api/projects/:id/visual-identity/style/upload', upload.single('image'), (req,res) => { const projectId=String(req.params.id); if(!requireProject(projectId,res))return; if(!req.file)return res.status(400).json({error:'Choose an image to upload.'}); res.status(201).json({asset:uploadVisualReference(projectId,'style',undefined,req.file)}); });
 app.post('/api/projects/:id/visual-identity/:type/:referenceId/upload', upload.single('image'), (req,res) => { const projectId=String(req.params.id),referenceId=String(req.params.referenceId); if(!requireProject(projectId,res))return; if(!req.file)return res.status(400).json({error:'Choose an image to upload.'}); const asset=uploadVisualReference(projectId,referenceType.parse(String(req.params.type)),referenceId,req.file); if(!asset)return res.status(404).json({error:'Visual reference not found.'}); res.status(201).json({asset}); });
@@ -444,20 +450,20 @@ app.post('/api/projects/:id/shots/:shotId/generate-image', async (req, res, next
 app.post('/api/projects/:id/shots/:shotId/generate-variants', async (req, res, next) => {
   try {
     const project = requireProject(req.params.id, res); if (!project) return;
-    const { count } = z.object({ count: z.number().int().min(2).max(4) }).parse(req.body);
+    const { count, qualityPreset } = ImageQualityOverrideInput.extend({ count: z.number().int().min(2).max(4) }).parse(req.body);
     const shots = db.prepare('SELECT * FROM shots WHERE project_id=? ORDER BY position').all(project.id) as any[];
     const index = shots.findIndex(shot => shot.id === req.params.shotId); if (index < 0) return res.status(404).json({ error: 'Storyboard shot not found' });
-    for (let i=0;i<count;i++) await generateSingle(project, shots[index], shots[index - 1]);
+    for (let i=0;i<count;i++) await generateSingle(project, shots[index], shots[index - 1], { qualityPreset });
     res.json(asShot(db.prepare('SELECT * FROM shots WHERE id=?').get(req.params.shotId)));
   } catch (error) { next(error); }
 });
 app.post('/api/projects/:id/shots/:shotId/refine', async (req, res, next) => {
   try {
     const project = requireProject(req.params.id, res); if (!project) return;
-    const { assetId, instruction } = z.object({ assetId:z.string().min(1), instruction:z.string().min(1).max(2000) }).parse(req.body);
+    const { assetId, instruction, qualityPreset } = ImageQualityOverrideInput.extend({ assetId:z.string().min(1), instruction:z.string().min(1).max(2000) }).parse(req.body);
     const shot = db.prepare('SELECT * FROM shots WHERE id=? AND project_id=?').get(req.params.shotId, project.id) as any;
     if (!shot) return res.status(404).json({ error:'Storyboard shot not found' });
-    await refineSingle(project, shot, assetId, instruction);
+    await refineSingle(project, shot, assetId, instruction, { qualityPreset });
     res.json(asShot(db.prepare('SELECT * FROM shots WHERE id=?').get(req.params.shotId)));
   } catch (error) { next(error); }
 });
@@ -515,12 +521,16 @@ app.post('/api/projects/:id/shots/bulk-review', (req, res) => {
 });
 app.post('/api/projects/:id/generate-images', async (req, res, next) => {
   try {
-    const body = z.object({ shotIds: z.array(z.string()).optional() }).parse(req.body ?? {});
+    const body = ImageQualityOverrideInput.extend({ shotIds: z.array(z.string().min(1)).optional() }).parse(req.body ?? {});
     const project = requireProject(req.params.id, res); if (!project) return;
 
     const allShots = db.prepare('SELECT * FROM shots WHERE project_id = ? ORDER BY position').all(req.params.id) as any[];
-    const selected = body.shotIds?.length ? allShots.filter(s => body.shotIds!.includes(s.id)) : allShots.filter(s => s.generation_status === 'needs_regeneration' || !listGenerations(s.id).some(generation => generation.active && generation.status === 'generated'));
-    res.status(202).json(startBatch(project, selected));
+    const hasExplicitSelection = Boolean(body.shotIds?.length);
+    if (hasExplicitSelection && new Set(body.shotIds).size !== body.shotIds!.length) return res.status(400).json({ error: 'Each selected shot can only be included once.' });
+    const selected = hasExplicitSelection ? allShots.filter(s => body.shotIds!.includes(s.id)) : allShots.filter(s => s.generation_status !== 'generating' && (s.generation_status === 'needs_regeneration' || !listGenerations(s.id).some(generation => generation.active && generation.status === 'generated')));
+    if (hasExplicitSelection && selected.length !== body.shotIds!.length) return res.status(400).json({ error: 'One or more selected shots were not found in this project.' });
+    if (selected.some(shot => shot.generation_status === 'generating')) return res.status(409).json({ error: 'Wait for the selected shots that are already generating, then try again.' });
+    res.status(202).json(startBatch(project, selected, { qualityPreset: body.qualityPreset }));
   } catch (error) { next(error); }
 });
 

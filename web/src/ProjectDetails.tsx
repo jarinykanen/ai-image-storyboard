@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
 import { WorkspaceHeader } from './AppLayout';
 import { Button, Checkbox, Paper, Select, Stack, Text, Textarea } from '@mantine/core';
+import { ProjectImageSettings } from './ProjectImageSettings';
 
 const API = 'http://localhost:3001/api';
 
 const targetLabels:Record<string,string>={youtube:'YouTube','youtube-shorts':'YouTube Shorts',tiktok:'TikTok',spotify:'Spotify',landscape:'Generic Landscape',vertical:'Generic Vertical',square:'Generic Square'};
-export function ProjectDetails({ project, onSaved }: { project: { id: string; suno_description?: string | null; publishing_targets?:string; primary_visual_format?:string }; onSaved: () => Promise<void> }) {
+type Project = { id:string; suno_description?:string|null; publishing_targets?:string; primary_visual_format?:string; image_provider:'openai'|'grok'; image_quality_preset?:'draft'|'standard'|'best'; image_model_override?:string|null; image_resolution_override?:string|null };
+export function ProjectDetails({ project, onSaved }: { project: Project; onSaved: () => Promise<void> }) {
   const [sunoDescription, setSunoDescription] = useState(project.suno_description ?? '');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -26,7 +28,8 @@ export function ProjectDetails({ project, onSaved }: { project: { id: string; su
   }
   async function savePublishing(){setBusy(true);setMessage('');try{const r=await fetch(`${API}/projects/${project.id}/publishing`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({publishingTargets:targets,primaryVisualFormat:targets.includes(primary)?primary:(targets[0]||'landscape')})});if(!r.ok)throw new Error((await r.json()).error||'Could not save publishing targets.');await onSaved();setMessage('Publishing targets saved. No images were generated or changed.');}catch(e){setMessage(e instanceof Error?e.message:'Could not save publishing targets.')}finally{setBusy(false)}}
 
-  return <main><WorkspaceHeader title="Project settings" description="Keep the song’s original creative direction with your project." />
+  return <main><WorkspaceHeader title="General settings" description="Manage project-wide defaults and creative context." />
+    <Paper className="panel project-details" p="lg"><ProjectImageSettings project={project} onSaved={onSaved}/></Paper>
     <Paper className="panel project-details" p="lg"><Stack><h2>Song context</h2><Textarea label="SUNO description (optional)" minRows={10} value={sunoDescription} onChange={event => setSunoDescription(event.target.value)} placeholder="Paste the original SUNO song description or prompt here." /><Text>Paste the original SUNO song description or prompt here. This helps the AI understand the song's style, mood, instruments and overall direction.</Text><Button loading={busy} onClick={() => void save()}>Save project settings</Button></Stack></Paper><Paper className="panel project-details" p="lg"><Stack><h2>Publishing targets</h2><Text>Targets guide future generation and artwork only. Existing images are never regenerated.</Text>{Object.entries(targetLabels).map(([id,label])=><Checkbox key={id} label={label} checked={targets.includes(id)} onChange={e=>setTargets(e.target.checked?[...targets,id]:targets.filter(x=>x!==id))}/>) }<Select label="Primary visual format" value={targets.includes(primary)?primary:(targets[0]||'landscape')} onChange={value=>setPrimary(value || 'landscape')} data={(targets.length?targets:['landscape']).map(id=>({value:id,label:targetLabels[id]}))}/><Button loading={busy} onClick={()=>void savePublishing()}>Save publishing targets</Button>{message && <Text className={message.startsWith('SUNO')||message.startsWith('Publishing') ? 'settings-message' : 'inline-error'}>{message}</Text>}</Stack></Paper>
   </main>;
 }

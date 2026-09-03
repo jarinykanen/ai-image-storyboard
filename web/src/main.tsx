@@ -7,7 +7,6 @@ import { VisualIdentity, VisualIdentitySidebar, type VisualIdentityData } from '
 import { VisualConcepts, type VisualConcept } from './VisualConcepts';
 import { Storyboard, type StoryboardShot, type StoryboardReview } from './Storyboard';
 import { SettingsPage } from './Settings';
-import { ProjectImageSettings } from './ProjectImageSettings';
 import { ProjectLayout, type ProjectView } from './ProjectLayout';
 import { ProjectDetails } from './ProjectDetails';
 import { ArtworkPage } from './Artwork';
@@ -18,7 +17,7 @@ import { ProjectCreationModal } from './ProjectCreationModal';
 
 const API = 'http://localhost:3001/api';
 
-type Project = { id:string; title:string; lyrics:string; suno_description?:string | null; visual_style:string; aspect_ratio:string; image_provider:string; image_quality_preset?:string; storyboard_approach?:'narrative'|'performance'|'abstract'|'mixed'; created_at:string };
+type Project = { id:string; title:string; lyrics:string; suno_description?:string | null; visual_style:string; aspect_ratio:string; image_provider:'openai'|'grok'; image_quality_preset?:'draft'|'standard'|'best'; image_model_override?:string|null; image_resolution_override?:string|null; storyboard_approach?:'narrative'|'performance'|'abstract'|'mixed'; publishing_targets?:string; primary_visual_format?:string; created_at:string };
 type ActiveProject = { project: Project; shots: StoryboardShot[]; storyboardPlan?:{summary:string;motifs:string[]}|null; visualIdentity: VisualIdentityData; concepts: VisualConcept[]; storyboardReview: StoryboardReview|null; artwork:any[] };
 type ProviderSettings = { configured:boolean; status:string; capabilities: { textGeneration:boolean; imageGeneration:boolean; imageEditing:boolean; referenceImages:boolean } };
 type ProviderRegistry = { providers: Record<'openai'|'grok', ProviderSettings>; defaultTextProvider: 'openai'|'grok'|null; defaultImageProvider: 'openai'|'grok'|null };
@@ -131,8 +130,9 @@ function App() {
   if (active) {
     const refreshActive = () => openProject(active.project.id);
     const selectedConcept = active.concepts.find(concept => concept.status === 'selected');
-    const sidebar = view === 'storyboard' ? <ProjectImageSettings project={active.project as any} onSaved={refreshActive} /> : view === 'concepts' ? <section className="context-info"><h2>Creative direction</h2><p>{active.project.visual_style}</p><hr/><h3>Concepts</h3><p>Generate text concepts or create your own direction. Reference images remain an explicit action.</p></section> : view === 'identity' ? <VisualIdentitySidebar selectedConcept={selectedConcept} /> : <section className="context-info"><h2>Project settings</h2><p>Update song context without generating or changing images.</p></section>;
-    const page = view === 'identity' ? <VisualIdentity key={JSON.stringify(active.visualIdentity)} projectId={active.project.id} identity={active.visualIdentity} selectedConcept={selectedConcept} onRefresh={refreshActive} /> : view === 'concepts' ? <VisualConcepts projectId={active.project.id} concepts={active.concepts} onRefresh={refreshActive} /> : view === 'settings' ? <ProjectDetails project={active.project} onSaved={refreshActive} /> : view === 'artwork' ? <ArtworkPage project={active.project} artwork={active.artwork} shots={active.shots} onRefresh={refreshActive}/> : <Storyboard projectId={active.project.id} shots={active.shots} identity={active.visualIdentity} review={active.storyboardReview} onRefresh={refreshActive} />;
+    const sidebar = view === 'concepts' ? <section className="context-info"><h2>Creative direction</h2><p>{active.project.visual_style}</p><hr/><h3>Concepts</h3><p>Generate text concepts or create your own direction. Reference images remain an explicit action.</p></section> : view === 'identity' ? <VisualIdentitySidebar selectedConcept={selectedConcept} /> : <section className="context-info"><h2>{view === 'settings' ? 'General settings' : 'Project context'}</h2><p>{view === 'settings' ? 'Defaults here apply across image generation and can be overridden before each generation.' : 'Image generation uses the project defaults unless you override the quality in the confirmation window.'}</p></section>;
+    const defaultQuality = active.project.image_quality_preset ?? 'standard';
+    const page = view === 'identity' ? <VisualIdentity key={JSON.stringify(active.visualIdentity)} projectId={active.project.id} identity={active.visualIdentity} selectedConcept={selectedConcept} defaultQuality={defaultQuality} onRefresh={refreshActive} /> : view === 'concepts' ? <VisualConcepts projectId={active.project.id} concepts={active.concepts} defaultQuality={defaultQuality} onRefresh={refreshActive} /> : view === 'settings' ? <ProjectDetails project={active.project} onSaved={refreshActive} /> : view === 'artwork' ? <ArtworkPage project={active.project} artwork={active.artwork} shots={active.shots} onRefresh={refreshActive}/> : <Storyboard projectId={active.project.id} shots={active.shots} identity={active.visualIdentity} review={active.storyboardReview} defaultQuality={defaultQuality} onRefresh={refreshActive} />;
     return <ProjectLayout projectTitle={active.project.title} view={view} onBack={() => closeProject()} onViewChange={setView} sidebar={sidebar}>{page}</ProjectLayout>;
   }
 

@@ -68,13 +68,13 @@ export async function generateSingle(project: Project, shot: ShotRow, previous?:
   const id = createGeneration(project, shot.id, override); await runGeneration(project, shot, id, previous, override); return listGenerations(shot.id)[0];
 }
 
-export async function refineSingle(project: Project, shot: ShotRow, assetId: string, instruction: string) {
+export async function refineSingle(project: Project, shot: ShotRow, assetId: string, instruction: string, override?: Partial<Pick<ImageGenerationRequest, 'qualityPreset' | 'modelOverride' | 'resolutionOverride'>>) {
   const source = findAsset(assetId);
   if (!source || source.projectId !== project.id || source.ownerType !== 'shot' || source.ownerId !== shot.id) throw new Error('Image version not found.');
-  const id = createGeneration(project, shot.id);
+  const id = createGeneration(project, shot.id, override);
   db.prepare("UPDATE image_generations SET status='generating' WHERE id=?").run(id);
   try {
-    const request = resolveImageRequest(project, shot);
+    const request = resolveImageRequest(project, shot, undefined, override);
     request.prompt = `${request.prompt}\n\nRefine the supplied image: ${instruction.trim()}. Keep the rest of the image as consistent as possible.`;
     const result = await refineImage(project.image_provider, request, fs.readFileSync(source.storagePath), source.originalFilename || 'source.png');
     const asset = await createGeneratedAsset({ projectId:project.id, ownerType:'shot', ownerId:shot.id, url:result.url, provider:project.image_provider, model:result.model, quality:result.quality, resolution:result.resolution });
@@ -83,21 +83,21 @@ export async function refineSingle(project: Project, shot: ShotRow, assetId: str
   } catch (error) { db.prepare("UPDATE image_generations SET status='failed', error_message=? WHERE id=?").run(error instanceof Error ? error.message : 'Refinement failed',id); throw error; }
 }
 
-export function startBatch(project: Project, shots: ShotRow[]) {
+export function startBatch(project: Project, shots: ShotRow[], override?: Partial<Pick<ImageGenerationRequest, 'qualityPreset' | 'modelOverride' | 'resolutionOverride'>>) {
   const id = crypto.randomUUID();
   db.prepare("INSERT INTO image_generation_batches (id,project_id,status,total,created_at) VALUES (?,?,'queued',?,?)").run(id, project.id, shots.length, new Date().toISOString());
-  const jobs = shots.map(shot => ({ shot, generationId: createGeneration(project, shot.id) }));
-  if (jobs.length) void runBatch(id, project, jobs);
+  const jobs = shots.map(shot => ({ shot, generationId: createGeneration(project, shot.id, override) }));
+  if (jobs.length) void runBatch(id, project, jobs, override);
   else db.prepare("UPDATE image_generation_batches SET status='completed' WHERE id=?").run(id);
   return getBatch(id)!;
 }
-async function runBatch(id: string, project: Project, jobs: { shot: ShotRow; generationId: string }[]) {
+async function runBatch(id: string, project: Project, jobs: { shot: ShotRow; generationId: string }[], override?: Partial<Pick<ImageGenerationRequest, 'qualityPreset' | 'modelOverride' | 'resolutionOverride'>>) {
   db.prepare("UPDATE image_generation_batches SET status='generating' WHERE id=?").run(id);
   const allShots = db.prepare('SELECT * FROM shots WHERE project_id=? ORDER BY position').all(project.id) as ShotRow[];
   const limit = pLimit(project.image_provider === 'grok' ? 4 : 3);
   await Promise.all(jobs.map(({ shot, generationId }) => limit(async () => {
     db.prepare('UPDATE image_generation_batches SET currently_generating=currently_generating+1 WHERE id=?').run(id);
-    try { await runGeneration(project, shot, generationId, allShots.find(item => item.position === shot.position - 1)); db.prepare('UPDATE image_generation_batches SET completed=completed+1, currently_generating=currently_generating-1 WHERE id=?').run(id); }
+    try { await runGeneration(project, shot, generationId, allShots.find(item => item.position === shot.position - 1), override); db.prepare('UPDATE image_generation_batches SET completed=completed+1, currently_generating=currently_generating-1 WHERE id=?').run(id); }
     catch { db.prepare('UPDATE image_generation_batches SET failed=failed+1, currently_generating=currently_generating-1 WHERE id=?').run(id); }
   })));
   const batch = getBatch(id)!;
