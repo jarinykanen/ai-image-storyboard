@@ -89,6 +89,27 @@ CREATE TABLE IF NOT EXISTS image_generations (
   FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
   FOREIGN KEY(shot_id) REFERENCES shots(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS image_assets (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  owner_type TEXT NOT NULL CHECK(owner_type IN ('concept','reference','style','shot','artwork')),
+  owner_id TEXT NOT NULL,
+  source TEXT NOT NULL CHECK(source IN ('generated','uploaded')),
+  storage_path TEXT NOT NULL,
+  original_filename TEXT,
+  mime_type TEXT NOT NULL,
+  file_size INTEGER NOT NULL,
+  version INTEGER NOT NULL,
+  active INTEGER NOT NULL DEFAULT 0,
+  provider TEXT,
+  model TEXT,
+  quality TEXT,
+  resolution TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS image_assets_owner_version ON image_assets(owner_type, owner_id, version);
+CREATE UNIQUE INDEX IF NOT EXISTS image_assets_one_active ON image_assets(owner_type, owner_id) WHERE active = 1;
 CREATE INDEX IF NOT EXISTS image_generations_shot_version ON image_generations(shot_id, version);
 CREATE UNIQUE INDEX IF NOT EXISTS image_generations_one_active ON image_generations(shot_id) WHERE active = 1;
 
@@ -115,6 +136,25 @@ CREATE TABLE IF NOT EXISTS storyboard_plans (
   opening TEXT NOT NULL, midpoint TEXT NOT NULL, climax TEXT NOT NULL, ending TEXT NOT NULL, motifs TEXT NOT NULL DEFAULT '[]',
   primary_character_ids TEXT NOT NULL DEFAULT '[]', primary_location_ids TEXT NOT NULL DEFAULT '[]', pacing_notes TEXT NOT NULL, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS storyboard_reviews (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL, created_at TEXT NOT NULL,
+  summary TEXT NOT NULL, score INTEGER, context_signature TEXT NOT NULL,
+  FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS storyboard_review_issues (
+  id TEXT PRIMARY KEY, review_id TEXT NOT NULL, severity TEXT NOT NULL CHECK(severity IN ('info','warning','important')),
+  category TEXT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL, shot_ids TEXT NOT NULL DEFAULT '[]',
+  suggestion TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','resolved','ignored')),
+  FOREIGN KEY(review_id) REFERENCES storyboard_reviews(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS storyboard_reviews_project_created ON storyboard_reviews(project_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS storyboard_review_issues_review ON storyboard_review_issues(review_id);
+CREATE TABLE IF NOT EXISTS project_artwork (
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL, type TEXT NOT NULL CHECK(type IN ('thumbnail','cover','canvas')),
+  platform TEXT NOT NULL, active_asset_id TEXT, source_asset_id TEXT, source TEXT NOT NULL DEFAULT 'project', text_config TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS project_artwork_one_type_platform ON project_artwork(project_id,type,platform);
 `);
 
 // Lightweight migrations for databases created before concepts could be edited
@@ -150,6 +190,9 @@ const generationColumns = new Set((db.prepare('PRAGMA table_info(image_generatio
 if (!generationColumns.has('approved')) db.exec('ALTER TABLE image_generations ADD COLUMN approved INTEGER NOT NULL DEFAULT 0');
 if (!generationColumns.has('quality')) db.exec("ALTER TABLE image_generations ADD COLUMN quality TEXT NOT NULL DEFAULT 'standard'");
 if (!generationColumns.has('resolution')) db.exec("ALTER TABLE image_generations ADD COLUMN resolution TEXT NOT NULL DEFAULT '1024x1024'");
+if (!generationColumns.has('asset_id')) db.exec('ALTER TABLE image_generations ADD COLUMN asset_id TEXT');
+if (!generationColumns.has('source')) db.exec("ALTER TABLE image_generations ADD COLUMN source TEXT NOT NULL DEFAULT 'generated'");
+if (!generationColumns.has('original_filename')) db.exec('ALTER TABLE image_generations ADD COLUMN original_filename TEXT');
 db.prepare("UPDATE image_generations SET approved=1 WHERE active=1 AND shot_id IN (SELECT id FROM shots WHERE approval_status='approved')").run();
 
 const projectColumns = new Set((db.prepare('PRAGMA table_info(projects)').all() as { name: string }[]).map(column => column.name));
@@ -159,6 +202,26 @@ addProjectColumn('image_model_override', 'TEXT');
 addProjectColumn('image_resolution_override', 'TEXT');
 addProjectColumn('suno_description', 'TEXT');
 addProjectColumn('storyboard_approach', "TEXT NOT NULL DEFAULT 'mixed'");
+addProjectColumn('publishing_targets', "TEXT NOT NULL DEFAULT '[]'");
+addProjectColumn('primary_visual_format', "TEXT NOT NULL DEFAULT 'landscape'");
+const artworkColumns = new Set((db.prepare('PRAGMA table_info(project_artwork)').all() as { name:string }[]).map(column=>column.name));
+if (!artworkColumns.has('source_asset_id')) db.exec('ALTER TABLE project_artwork ADD COLUMN source_asset_id TEXT');
+
+// Older SQLite files have a restrictive owner_type CHECK. Rebuild only that
+// table once, preserving every existing asset and index, to add artwork assets.
+const assetSql = (db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='image_assets'").get() as { sql?: string } | undefined)?.sql || '';
+if (!assetSql.includes("'artwork'")) {
+  db.exec(`ALTER TABLE image_assets RENAME TO image_assets_legacy;
+    CREATE TABLE image_assets (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL, owner_type TEXT NOT NULL CHECK(owner_type IN ('concept','reference','style','shot','artwork')), owner_id TEXT NOT NULL,
+      source TEXT NOT NULL CHECK(source IN ('generated','uploaded')), storage_path TEXT NOT NULL, original_filename TEXT, mime_type TEXT NOT NULL, file_size INTEGER NOT NULL,
+      version INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 0, provider TEXT, model TEXT, quality TEXT, resolution TEXT, created_at TEXT NOT NULL,
+      FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE);
+    INSERT INTO image_assets SELECT * FROM image_assets_legacy;
+    DROP TABLE image_assets_legacy;
+    CREATE INDEX IF NOT EXISTS image_assets_owner_version ON image_assets(owner_type, owner_id, version);
+    CREATE UNIQUE INDEX IF NOT EXISTS image_assets_one_active ON image_assets(owner_type, owner_id) WHERE active = 1;`);
+}
 
 // Reference images are intentionally retained after copy edits. These snapshots
 // let the UI indicate when the retained image no longer represents the text.

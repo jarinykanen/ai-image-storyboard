@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { db } from './db.js';
 import { generateImage, getTextClient, type ImageProvider } from './providers.js';
 import { buildConceptImagePrompt, buildConceptTextPrompt, buildSingleConceptPrompt } from './visual-concept-prompts.js';
+import { createGeneratedAsset, createUploadedAsset, listAssets } from './assets.js';
 
 const ConceptsSchema = z.object({ concepts: z.array(z.object({
   title: z.string().min(1), description: z.string().min(1), mood: z.string().min(1),
@@ -14,7 +15,7 @@ export type VisualConcept = {
   id: string; title: string; description: string; mood: string; visualStyle: string;
   colorAndLighting: string; narrativeDirection: string; referenceImageUrl: string | null;
   status: 'generating' | 'generated' | 'selected' | 'failed'; imageStatus: 'pending' | 'generating' | 'generated' | 'failed';
-  source: 'ai' | 'manual'; imageOutdated: boolean;
+  source: 'ai' | 'manual'; imageOutdated: boolean; imageAssets: ReturnType<typeof listAssets>;
 };
 
 export type ConceptInput = z.infer<typeof ConceptSchema>;
@@ -27,6 +28,7 @@ const asConcept = (row: any): VisualConcept => ({
   colorAndLighting: asText(row.color_and_lighting), narrativeDirection: asText(row.narrative_direction),
   referenceImageUrl: row.reference_image_url ?? null, status: row.status, imageStatus: row.image_status, source: row.source ?? 'ai',
   imageOutdated: Boolean(row.reference_image_url && row.image_concept_signature !== conceptSignature({ title: asText(row.title), description: asText(row.description), mood: asText(row.mood), visualStyle: asText(row.visual_style), colorAndLighting: asText(row.color_and_lighting), narrativeDirection: asText(row.narrative_direction) })),
+  imageAssets: listAssets('concept', row.id),
 });
 
 export function getConcepts(projectId: string) {
@@ -97,12 +99,16 @@ export async function generateConceptImage(project: { id: string; image_provider
   db.prepare("UPDATE visual_concepts SET image_status = 'generating' WHERE id = ?").run(conceptId);
   try {
     const prompt = buildConceptImagePrompt(row);
-    const result = await generateImage(project.image_provider, { projectId: project.id, shotId: `concept:${conceptId}`, aspectRatio: project.aspect_ratio, visualStyle: row.visual_style, concept: null, description: prompt, action: '', shotType: 'concept reference', camera: '', mood: row.mood, characters: [], location: null, previousShot: null, generationInstructions: '', prompt, qualityPreset: (project as any).image_quality_preset, modelOverride: (project as any).image_model_override, resolutionOverride: (project as any).image_resolution_override });
-    db.prepare("UPDATE visual_concepts SET reference_image_url = ?, image_status = 'generated', image_concept_signature = ?, image_provider=?, image_model=?, image_quality=?, image_resolution=? WHERE id = ?").run(result.url, conceptSignature({ title: row.title, description: row.description, mood: row.mood, visualStyle: row.visual_style, colorAndLighting: row.color_and_lighting, narrativeDirection: row.narrative_direction }), project.image_provider, result.model, result.quality, result.resolution, conceptId);
-    const imageUrl = result.url;
+    const style = { id: 'concept-style', type: 'style' as const, name: 'Visual Style', description: row.visual_style, imageAsset: null, locked: false, stale: false };
+    const result = await generateImage(project.image_provider, { projectId: project.id, shotId: `concept:${conceptId}`, aspectRatio: project.aspect_ratio, visualStyle: row.visual_style, concept: null, description: prompt, action: '', shotType: 'concept reference', camera: '', mood: row.mood, characters: [], location: null, previousShot: null, referenceContext: { style, characters: [], location: null, continuityReference: null }, generationInstructions: '', prompt, qualityPreset: (project as any).image_quality_preset, modelOverride: (project as any).image_model_override, resolutionOverride: (project as any).image_resolution_override });
+    const asset = await createGeneratedAsset({ projectId:project.id, ownerType:'concept', ownerId:conceptId, url:result.url, provider:project.image_provider, model:result.model, quality:result.quality, resolution:result.resolution });
+    db.prepare("UPDATE visual_concepts SET reference_image_url = ?, image_status = 'generated', image_concept_signature = ?, image_provider=?, image_model=?, image_quality=?, image_resolution=? WHERE id = ?").run(asset.url, conceptSignature({ title: row.title, description: row.description, mood: row.mood, visualStyle: row.visual_style, colorAndLighting: row.color_and_lighting, narrativeDirection: row.narrative_direction }), project.image_provider, result.model, result.quality, result.resolution, conceptId);
+    const imageUrl = asset.url;
     return imageUrl;
   } catch (error) {
     db.prepare("UPDATE visual_concepts SET image_status = 'failed' WHERE id = ?").run(conceptId);
     throw error;
   }
 }
+
+export function uploadConceptImage(projectId:string, conceptId:string, file:{buffer:Buffer;mimetype:string;originalname:string}) { if(!db.prepare('SELECT id FROM visual_concepts WHERE id=? AND project_id=?').get(conceptId,projectId)) return null; const asset=createUploadedAsset({projectId,ownerType:'concept',ownerId:conceptId,data:file.buffer,mimeType:file.mimetype,originalFilename:file.originalname}); db.prepare("UPDATE visual_concepts SET reference_image_url=?, image_status='generated' WHERE id=?").run(asset.url,conceptId); return asset; }

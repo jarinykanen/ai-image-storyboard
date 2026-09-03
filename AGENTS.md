@@ -1,4 +1,3 @@
-
 # AGENTS.md
 
 ## Project
@@ -34,6 +33,7 @@ Future scope may include image-to-video generation and editing assistance.
 * Search the codebase before introducing functionality that may already exist.
 * Preserve backward compatibility unless the task explicitly requires a breaking change.
 * Never expose API keys or secrets to the browser.
+* Before implementation, create a short "preservation checklist" of the existing functionality in the files/views being modified. Use it as regression acceptance criteria.
 
 If requirements conflict with the current implementation, explain the conflict before making a destructive or architectural change.
 
@@ -371,3 +371,129 @@ Paid generation must remain separate from CRUD operations and normal workflow na
 Before any multi-image generation action, show the exact number of images that will be generated and require confirmation.
 
 Never create automatic regeneration loops.
+
+## Non-Regression and Feature Preservation
+
+Existing working functionality must be preserved unless the task explicitly requests its removal or replacement.
+
+When implementing a new feature, redesign, refactor, or architecture change:
+
+- Do not remove existing features merely because they are not mentioned in the current task.
+- Do not replace existing functionality with a simpler implementation unless explicitly requested.
+- Do not remove buttons, actions, settings, workflows, data fields, API endpoints, provider capabilities, exports, uploads, downloads, versioning, approval states, or user controls without explicit instruction.
+- Do not interpret UI redesigns as permission to reduce functionality.
+- Do not interpret refactors as permission to change product behavior.
+- Preserve backward compatibility with existing project data wherever practical.
+- Preserve existing API behavior unless the task explicitly requires a breaking change.
+- Preserve existing generated/uploaded assets and user data.
+
+Before modifying an existing view or workflow:
+
+1. Inspect the current implementation.
+2. Identify all existing user-facing functionality in that area.
+3. Treat that functionality as required acceptance criteria for the change.
+4. Implement the requested change while retaining those capabilities.
+5. Verify the existing workflow still works afterward.
+
+If the requested change conflicts with existing functionality:
+
+- do not silently remove the existing behavior
+- report the conflict
+- choose the least destructive compatible implementation
+- ask for clarification only if the conflict cannot reasonably be resolved
+
+### UI Redesign Rule
+
+A UI redesign is a presentation/layout change unless otherwise stated.
+
+It must preserve:
+
+- existing actions
+- existing settings
+- existing editing capabilities
+- existing generation options
+- existing upload/download actions
+- existing version/history behavior
+- existing approval/review functionality
+- existing provider/model controls
+- existing navigation destinations
+
+Controls may be moved, grouped, collapsed, or placed in menus, but they must not disappear unless explicitly requested.
+
+### Refactoring Rule
+
+When refactoring shared components or architecture:
+
+- preserve observable behavior
+- preserve supported workflows
+- reuse existing business logic where possible
+- do not delete code until all existing consumers have been migrated
+- verify that replacement components support the complete feature set of the components they replace
+
+Do not perform opportunistic cleanup that removes apparently unused functionality without confirming that it is truly obsolete.
+
+### Data Model Rule
+
+Schema changes must be additive by default.
+
+Prefer:
+
+- adding optional fields
+- migrations with safe defaults
+- compatibility layers
+
+Avoid:
+
+- dropping fields
+- deleting tables
+- changing meanings of existing fields
+- destructive migrations
+
+unless explicitly required by the task.
+
+### API Rule
+
+Existing API endpoints are part of the product contract.
+
+Do not:
+
+- delete endpoints
+- rename endpoints
+- remove response fields
+- make optional fields required
+- change semantics
+
+unless explicitly requested.
+
+If a better endpoint is introduced, keep the existing endpoint working where practical until migration is complete.
+
+### Verification Rule
+
+Every implementation task that touches existing functionality must verify both:
+
+1. the new requested behavior
+2. the relevant existing behavior
+
+At the end of the task, report:
+
+- new functionality added
+- existing functionality preserved
+- any behavior intentionally changed
+- any behavior removed, with explicit reason
+- regression checks performed
+
+If any existing feature could not be preserved, clearly report it rather than silently omitting it.
+
+## UI Component Library
+
+Mantine is the application's primary UI component library.
+
+For standard UI primitives, use Mantine components instead of creating custom or native equivalents.
+
+Examples include buttons, inputs, selects, dialogs, menus, tabs, badges, tooltips, cards, layout primitives, loading states, and form controls.
+
+Application-specific components such as StoryboardCard, ImageCard, GenerationSettings, or WorkspaceHeader should remain domain components, but should use Mantine primitives internally where appropriate.
+
+Do not introduce another general-purpose UI component library without explicit instruction.
+
+Do not replace working application functionality merely to make it fit a Mantine component. Adapt the presentation while preserving behavior.

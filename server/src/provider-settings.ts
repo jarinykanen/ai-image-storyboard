@@ -2,24 +2,24 @@ import OpenAI from 'openai';
 import { db } from './db.js';
 
 export type Provider = 'openai' | 'grok';
-export type ProviderCapability = 'textGeneration' | 'imageGeneration' | 'imageEditing' | 'referenceImages';
+export type ProviderCapability = 'textGeneration' | 'imageGeneration' | 'imageEditing' | 'referenceImages' | 'imageUnderstanding';
 export type ProviderCapabilities = Record<ProviderCapability, boolean>;
 export type ProviderStatus = 'connected' | 'not_configured' | 'invalid_key' | 'rate_limited' | 'provider_unavailable' | 'error' | 'configured';
 export type ProviderSettings = { configured: boolean; status: ProviderStatus; lastSuccessfulTestAt: string | null };
 export type ProviderAvailability = ProviderSettings & { capabilities: ProviderCapabilities };
 export type ImageQuality = 'draft' | 'standard' | 'best';
 export type ImageResolution = '1024x1024' | '1024x1536' | '1536x1024' | '1k' | '2k';
-export type ImageModel = { provider: Provider; modelId: string; displayName: string; supportedQualities: ImageQuality[]; supportedResolutions: ImageResolution[]; referenceImageSupport: boolean; imageEditingSupport: boolean; recommendedUse: string; estimatedCostUsd?: Partial<Record<ImageQuality, number>> };
+export type ImageModel = { provider: Provider; modelId: string; displayName: string; supportedQualities: ImageQuality[]; supportedResolutions: ImageResolution[]; referenceImageSupport: boolean; imageEditingSupport: boolean; maxReferenceImages: number; recommendedUse: string; estimatedCostUsd?: Partial<Record<ImageQuality, number>> };
 
 // This is the single source of truth for image-model capabilities, presets, and
 // pricing estimates. Update it when providers change their offerings.
 export const imageModels: ImageModel[] = [
-  { provider: 'openai', modelId: 'gpt-image-2', displayName: 'GPT Image 2', supportedQualities: ['draft', 'standard', 'best'], supportedResolutions: ['1024x1024', '1024x1536', '1536x1024'], referenceImageSupport: false, imageEditingSupport: false, recommendedUse: 'Best overall image quality.', estimatedCostUsd: { draft: 0.01, standard: 0.04, best: 0.17 } },
-  { provider: 'openai', modelId: 'gpt-image-1', displayName: 'GPT Image 1', supportedQualities: ['draft', 'standard', 'best'], supportedResolutions: ['1024x1024', '1024x1536', '1536x1024'], referenceImageSupport: true, imageEditingSupport: true, recommendedUse: 'Use when direct image references or editing are needed.' },
-  { provider: 'openai', modelId: 'gpt-image-1-mini', displayName: 'GPT Image 1 Mini', supportedQualities: ['draft', 'standard'], supportedResolutions: ['1024x1024', '1024x1536', '1536x1024'], referenceImageSupport: false, imageEditingSupport: false, recommendedUse: 'Fast, low-cost storyboard previews.' },
-  { provider: 'grok', modelId: 'grok-imagine-image', displayName: 'Grok Imagine Image', supportedQualities: ['draft', 'standard'], supportedResolutions: ['1k'], referenceImageSupport: false, imageEditingSupport: false, recommendedUse: 'Fast visual exploration.' },
-  { provider: 'grok', modelId: 'grok-imagine-image-quality', displayName: 'Grok Imagine Image Quality', supportedQualities: ['standard', 'best'], supportedResolutions: ['1k', '2k'], referenceImageSupport: false, imageEditingSupport: false, recommendedUse: 'Higher-detail final images.' },
-  { provider: 'grok', modelId: 'grok-imagine-image-2.0', displayName: 'Grok Imagine Image 2', supportedQualities: ['draft', 'standard', 'best'], supportedResolutions: ['1k', '2k'], referenceImageSupport: false, imageEditingSupport: false, recommendedUse: 'Balanced Grok image generation.' },
+  { provider: 'openai', modelId: 'gpt-image-2', displayName: 'GPT Image 2', supportedQualities: ['draft', 'standard', 'best'], supportedResolutions: ['1024x1024', '1024x1536', '1536x1024'], referenceImageSupport: false, imageEditingSupport: false, maxReferenceImages: 0, recommendedUse: 'Best overall image quality.', estimatedCostUsd: { draft: 0.01, standard: 0.04, best: 0.17 } },
+  { provider: 'openai', modelId: 'gpt-image-1', displayName: 'GPT Image 1', supportedQualities: ['draft', 'standard', 'best'], supportedResolutions: ['1024x1024', '1024x1536', '1536x1024'], referenceImageSupport: true, imageEditingSupport: true, maxReferenceImages: 4, recommendedUse: 'Use when direct image references or editing are needed.' },
+  { provider: 'openai', modelId: 'gpt-image-1-mini', displayName: 'GPT Image 1 Mini', supportedQualities: ['draft', 'standard'], supportedResolutions: ['1024x1024', '1024x1536', '1536x1024'], referenceImageSupport: false, imageEditingSupport: false, maxReferenceImages: 0, recommendedUse: 'Fast, low-cost storyboard previews.' },
+  { provider: 'grok', modelId: 'grok-imagine-image', displayName: 'Grok Imagine Image', supportedQualities: ['draft', 'standard'], supportedResolutions: ['1k'], referenceImageSupport: false, imageEditingSupport: false, maxReferenceImages: 0, recommendedUse: 'Fast visual exploration.' },
+  { provider: 'grok', modelId: 'grok-imagine-image-quality', displayName: 'Grok Imagine Image Quality', supportedQualities: ['standard', 'best'], supportedResolutions: ['1k', '2k'], referenceImageSupport: false, imageEditingSupport: false, maxReferenceImages: 0, recommendedUse: 'Higher-detail final images.' },
+  { provider: 'grok', modelId: 'grok-imagine-image-2.0', displayName: 'Grok Imagine Image 2', supportedQualities: ['draft', 'standard', 'best'], supportedResolutions: ['1k', '2k'], referenceImageSupport: false, imageEditingSupport: false, maxReferenceImages: 0, recommendedUse: 'Balanced Grok image generation.' },
 ];
 export const imagePresets: Record<Provider, Record<ImageQuality, { modelId: string; quality: ImageQuality }>> = {
   openai: { draft: { modelId: 'gpt-image-1-mini', quality: 'draft' }, standard: { modelId: 'gpt-image-2', quality: 'standard' }, best: { modelId: 'gpt-image-2', quality: 'best' } },
@@ -38,9 +38,9 @@ export function resolveImageConfiguration(input: { provider: Provider; preset?: 
 }
 
 const providers: Record<Provider, { name: string; capabilities: ProviderCapabilities }> = {
-  openai: { name: 'OpenAI', capabilities: { textGeneration: true, imageGeneration: true, imageEditing: false, referenceImages: false } },
+  openai: { name: 'OpenAI', capabilities: { textGeneration: true, imageGeneration: true, imageEditing: true, referenceImages: true, imageUnderstanding: false } },
   // xAI text, editing, and direct reference-image adapters are not implemented yet.
-  grok: { name: 'xAI / Grok', capabilities: { textGeneration: false, imageGeneration: true, imageEditing: false, referenceImages: false } },
+  grok: { name: 'xAI / Grok', capabilities: { textGeneration: false, imageGeneration: true, imageEditing: false, referenceImages: false, imageUnderstanding: false } },
 };
 const providerOrder = Object.keys(providers) as Provider[];
 const envKey = (provider: Provider) => provider === 'openai' ? process.env.OPENAI_API_KEY : process.env.XAI_API_KEY;

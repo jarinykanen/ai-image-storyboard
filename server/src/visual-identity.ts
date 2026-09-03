@@ -4,12 +4,13 @@ import { generateImage, type ImageProvider } from './providers.js';
 import { getSelectedConcept } from './visual-concepts.js';
 import { buildSelectedConceptContext } from './visual-concept-prompts.js';
 import { buildSongContext } from './song-context.js';
+import { activateAsset, createGeneratedAsset, createUploadedAsset, listAssets } from './assets.js';
 
 export type ReferenceType = 'character' | 'location';
 
-export type VisualStyle = { description: string; image_url: string | null; image_outdated: boolean; locked: boolean };
+export type VisualStyle = { description: string; image_url: string | null; image_outdated: boolean; locked: boolean; imageAssets: ReturnType<typeof listAssets> };
 export type VisualReference = {
-  id: string; name: string; description: string; image_url: string | null; image_outdated: boolean; locked: boolean;
+  id: string; name: string; description: string; image_url: string | null; image_outdated: boolean; locked: boolean; imageAssets: ReturnType<typeof listAssets>;
 };
 export type VisualIdentity = { style: VisualStyle; characters: VisualReference[]; locations: VisualReference[] };
 
@@ -17,7 +18,7 @@ const referenceSignature = (name: string, description: string) => JSON.stringify
 const styleSignature = (description: string) => JSON.stringify({ description: description.trim() });
 const asReference = (row: any): VisualReference => ({
   id: row.id, name: row.name, description: row.description, image_url: row.image_url ?? null,
-  image_outdated: Boolean(row.image_url && row.image_signature !== referenceSignature(row.name, row.description)), locked: Boolean(row.locked),
+  image_outdated: Boolean(row.image_url && row.image_signature !== referenceSignature(row.name, row.description)), locked: Boolean(row.locked), imageAssets:listAssets('reference',row.id),
 });
 
 export function getVisualIdentity(projectId: string): VisualIdentity {
@@ -27,7 +28,7 @@ export function getVisualIdentity(projectId: string): VisualIdentity {
     style: {
       description: style?.style_description ?? '', image_url: style?.style_image_url ?? null,
       image_outdated: Boolean(style?.style_image_url && style?.style_image_signature !== styleSignature(style?.style_description ?? '')),
-      locked: Boolean(style?.style_locked),
+      locked: Boolean(style?.style_locked), imageAssets:listAssets('style',projectId),
     },
     characters: references.filter(reference => reference.type === 'character').map(asReference),
     locations: references.filter(reference => reference.type === 'location').map(asReference),
@@ -87,8 +88,12 @@ export async function generateVisualReference(project: { id: string; image_provi
       ? `Create a consistent character reference image for ${reference.name}. ${reference.description}. Visual style: ${identity.style.description || 'cinematic music video'}.${conceptContext} ${songContext} Do not include text, captions, logos, or watermarks.`
       : `Create a consistent location reference image for ${reference.name}. ${reference.description}. Visual style: ${identity.style.description || 'cinematic music video'}.${conceptContext} ${songContext} Do not include text, captions, logos, or watermarks.`;
   }
-  const result = await generateImage(project.image_provider, { projectId: project.id, shotId: `reference:${referenceId || 'style'}`, aspectRatio: project.aspect_ratio, visualStyle: identity.style.description, concept: null, description: prompt, action: '', shotType: 'reference image', camera: '', mood: '', characters: [], location: null, previousShot: null, generationInstructions: '', prompt, qualityPreset: (project as any).image_quality_preset, modelOverride: (project as any).image_model_override, resolutionOverride: (project as any).image_resolution_override });
-  const imageUrl = result.url;
+  const style = { id: 'visual-style', type: 'style' as const, name: 'Visual Style', description: identity.style.description, imageAsset: identity.style.image_url, locked: identity.style.locked, stale: identity.style.image_outdated };
+  const result = await generateImage(project.image_provider, { projectId: project.id, shotId: `reference:${referenceId || 'style'}`, aspectRatio: project.aspect_ratio, visualStyle: identity.style.description, concept: null, description: prompt, action: '', shotType: 'reference image', camera: '', mood: '', characters: [], location: null, previousShot: null, referenceContext: { style, characters: [], location: null, continuityReference: null }, generationInstructions: '', prompt, qualityPreset: (project as any).image_quality_preset, modelOverride: (project as any).image_model_override, resolutionOverride: (project as any).image_resolution_override });
+  const ownerType = target === 'style' ? 'style' as const : 'reference' as const;
+  const ownerId = target === 'style' ? project.id : referenceId!;
+  const asset = await createGeneratedAsset({ projectId:project.id, ownerType, ownerId, url:result.url, provider:project.image_provider, model:result.model, quality:result.quality, resolution:result.resolution });
+  const imageUrl = asset.url;
   if (target === 'style') {
     db.prepare('UPDATE visual_identities SET style_image_url = ?, style_image_signature = ?, style_image_provider=?, style_image_model=?, style_image_quality=?, style_image_resolution=? WHERE project_id = ?')
       .run(imageUrl, styleSignature(identity.style.description), project.image_provider, result.model, result.quality, result.resolution, project.id);
@@ -98,4 +103,62 @@ export async function generateVisualReference(project: { id: string; image_provi
       .run(imageUrl, referenceSignature(reference.name, reference.description), project.image_provider, result.model, result.quality, result.resolution, referenceId, project.id);
   }
   return imageUrl;
+}
+
+export function uploadVisualReference(projectId:string,target:'style'|ReferenceType,referenceId:string|undefined,file:{buffer:Buffer;mimetype:string;originalname:string}) {
+  const ownerType=target==='style'?'style' as const:'reference' as const; const ownerId=target==='style'?projectId:referenceId!;
+  if(target==='style') ensureVisualIdentity(projectId); else if(!db.prepare('SELECT id FROM visual_references WHERE id=? AND project_id=? AND type=?').get(referenceId,projectId,target)) return null;
+  const asset=createUploadedAsset({projectId,ownerType,ownerId,data:file.buffer,mimeType:file.mimetype,originalFilename:file.originalname});
+  if(target==='style') db.prepare('UPDATE visual_identities SET style_image_url=? WHERE project_id=?').run(asset.url,projectId); else db.prepare('UPDATE visual_references SET image_url=? WHERE id=? AND project_id=?').run(asset.url,referenceId,projectId);
+  return asset;
+}
+
+/** Select a stored identity asset without creating or deleting an image. */
+export function activateVisualReferenceAsset(projectId: string, target: 'style' | ReferenceType, referenceId: string | undefined, assetId: string) {
+  const ownerType = target === 'style' ? 'style' as const : 'reference' as const;
+  const ownerId = target === 'style' ? projectId : referenceId!;
+  if (target !== 'style' && !db.prepare('SELECT id FROM visual_references WHERE id=? AND project_id=? AND type=?').get(referenceId, projectId, target)) return null;
+  const asset = activateAsset(projectId, ownerType, ownerId, assetId);
+  if (!asset) return null;
+  if (target === 'style') {
+    db.prepare('UPDATE visual_identities SET style_image_url=? WHERE project_id=?').run(asset.url, projectId);
+  } else {
+    db.prepare('UPDATE visual_references SET image_url=? WHERE id=? AND project_id=? AND type=?').run(asset.url, referenceId, projectId, target);
+  }
+  return asset;
+}
+
+/** Hide the current image while retaining every stored version for later reuse. */
+export function clearVisualReferenceImage(projectId: string, target: 'style' | ReferenceType, referenceId?: string) {
+  const ownerType = target === 'style' ? 'style' as const : 'reference' as const;
+  const ownerId = target === 'style' ? projectId : referenceId!;
+  if (target === 'style') {
+    const style = db.prepare('SELECT style_locked FROM visual_identities WHERE project_id=?').get(projectId) as any;
+    if (!style) return false;
+    if (style.style_locked) throw new Error('Unlock the style reference before clearing its image.');
+  } else {
+    const reference = db.prepare('SELECT locked FROM visual_references WHERE id=? AND project_id=? AND type=?').get(referenceId, projectId, target) as any;
+    if (!reference) return false;
+    if (reference.locked) throw new Error('Unlock this reference before clearing its image.');
+  }
+  db.transaction(() => {
+    db.prepare('UPDATE image_assets SET active=0 WHERE project_id=? AND owner_type=? AND owner_id=?').run(projectId, ownerType, ownerId);
+    if (target === 'style') db.prepare('UPDATE visual_identities SET style_image_url=NULL WHERE project_id=?').run(projectId);
+    else db.prepare('UPDATE visual_references SET image_url=NULL WHERE id=? AND project_id=? AND type=?').run(referenceId, projectId, target);
+  })();
+  return true;
+}
+
+/** Acknowledge that the current image intentionally matches the edited description. */
+export function acknowledgeVisualReferenceImage(projectId: string, target: 'style' | ReferenceType, referenceId?: string) {
+  if (target === 'style') {
+    const style = db.prepare('SELECT style_description,style_image_url FROM visual_identities WHERE project_id=?').get(projectId) as any;
+    if (!style || !style.style_image_url) return false;
+    db.prepare('UPDATE visual_identities SET style_image_signature=? WHERE project_id=?').run(styleSignature(style.style_description), projectId);
+    return true;
+  }
+  const reference = db.prepare('SELECT name,description,image_url FROM visual_references WHERE id=? AND project_id=? AND type=?').get(referenceId, projectId, target) as any;
+  if (!reference || !reference.image_url) return false;
+  db.prepare('UPDATE visual_references SET image_signature=? WHERE id=? AND project_id=? AND type=?').run(referenceSignature(reference.name, reference.description), referenceId, projectId, target);
+  return true;
 }

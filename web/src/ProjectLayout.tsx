@@ -1,23 +1,12 @@
 import type { ReactNode } from 'react';
+import { Button, Group, Text } from '@mantine/core';
+import { AppLayout } from './AppLayout';
 
-export type ProjectView = 'concepts' | 'identity' | 'storyboard' | 'settings';
+export type ProjectView = 'concepts' | 'identity' | 'storyboard' | 'artwork' | 'settings';
 
-const labels: Record<ProjectView, string> = { concepts: 'Concepts', identity: 'Visual Identity', storyboard: 'Storyboard', settings: 'Settings' };
+const labels: Record<ProjectView, string> = { concepts: 'Concepts', identity: 'Visual Identity', storyboard: 'Storyboard', artwork: 'Artwork', settings: 'Settings' };
 
 export function ProjectLayout({ projectTitle, view, onBack, onViewChange, sidebar, children }: { projectTitle: string; view: ProjectView; onBack: () => void; onViewChange: (view: ProjectView) => void; sidebar?: ReactNode; children: ReactNode }) {
-  return <div className="project-shell">
-    <nav className="global-nav" aria-label="Project navigation">
-      <button className="nav-back" onClick={onBack}>← <span>Projects</span></button>
-      {(Object.keys(labels) as ProjectView[]).map(item => <button key={item} className={`nav-item ${view === item ? 'active' : ''}`} onClick={() => onViewChange(item)}>{labels[item]}</button>)}
-      <div className="project-name">Project: <strong>{projectTitle}</strong></div>
-    </nav>
-    <div className={`workspace-layout ${sidebar ? '' : 'no-sidebar'}`}>
-      {sidebar && <aside className="workspace-sidebar">{sidebar}</aside>}
-      <main className="workspace-main">{children}</main>
-    </div>
-  </div>;
-}
-
-export function WorkspaceHeader({ title, description, actions, children }: { title: string; description?: ReactNode; actions?: ReactNode; children?: ReactNode }) {
-  return <header className="workspace-header"><div><h1>{title}</h1>{description && <div className="workspace-description">{description}</div>}{children}</div>{actions && <div className="workspace-actions">{actions}</div>}</header>;
+  const navigation = <Group gap={6} wrap="nowrap"><Button variant="subtle" className="nav-back" onClick={onBack}>← <span>Projects</span></Button>{(Object.keys(labels) as ProjectView[]).map(item => <Button key={item} variant={view === item ? 'light' : 'subtle'} className={`nav-item ${view === item ? 'active' : ''}`} onClick={() => onViewChange(item)}>{labels[item]}</Button>)}</Group>;
+  return <AppLayout headerStart={navigation} headerEnd={<Text className="project-name">Project: <strong>{projectTitle}</strong></Text>} sidebar={sidebar}>{children}</AppLayout>;
 }

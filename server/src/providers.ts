@@ -1,9 +1,10 @@
 import OpenAI from 'openai';
 import { requireProviderKey, resolveImageConfiguration, resolveProvider, type ImageQuality, type ImageResolution, type Provider } from './provider-settings.js';
+import type { ReferenceContext, NormalizedReference } from './reference-context.js';
 
 export type ImageProvider = 'openai' | 'grok';
-export type ImageReference = { id: string; name: string; description: string; imageUrl: string | null };
-export type ImageGenerationRequest = { projectId: string; shotId: string; aspectRatio: string; visualStyle: string; concept: { title: string; description: string; mood: string; visualStyle: string; colorAndLighting: string } | null; description: string; action: string; shotType: string; camera: string; mood: string; characters: ImageReference[]; location: ImageReference | null; previousShot: { description: string; action: string; locationId: string | null } | null; generationInstructions: string; prompt: string; qualityPreset?: ImageQuality; modelOverride?: string | null; resolutionOverride?: ImageResolution | null };
+export type ImageReference = NormalizedReference;
+export type ImageGenerationRequest = { projectId: string; shotId: string; aspectRatio: string; visualStyle: string; concept: { title: string; description: string; mood: string; visualStyle: string; colorAndLighting: string } | null; description: string; action: string; shotType: string; camera: string; mood: string; characters: ImageReference[]; location: ImageReference | null; previousShot: { description: string; action: string; locationId: string | null } | null; referenceContext: ReferenceContext; generationInstructions: string; prompt: string; qualityPreset?: ImageQuality; modelOverride?: string | null; resolutionOverride?: ImageResolution | null };
 export type ImageGenerationResult = { url: string; model: string; quality: ImageQuality; resolution: ImageResolution };
 
 export function getTextClient(requestedProvider?: Provider) {
@@ -22,10 +23,13 @@ function getImageClient(provider: ImageProvider) {
 export async function generateImage(provider: ImageProvider, request: ImageGenerationRequest): Promise<ImageGenerationResult> {
   provider = resolveProvider('imageGeneration', { requested: provider });
   const client = getImageClient(provider);
-  const referenceImages = [...request.characters, request.location].filter((item): item is ImageReference => Boolean(item?.imageUrl));
-  if (referenceImages.length) console.info(`[${provider}] locked reference images supplied for shot ${request.shotId}; this provider adapter currently uses their descriptions in the prompt because its generate endpoint has no portable URL-reference field.`);
-
   const config = resolveImageConfiguration({ provider, preset: request.qualityPreset, modelId: request.modelOverride, resolution: request.resolutionOverride });
+  const selectedReferences = [...request.referenceContext.characters, request.referenceContext.location, request.referenceContext.style].filter(Boolean) as ImageReference[];
+  const candidates = [...selectedReferences, request.referenceContext.continuityReference].filter((item): item is ImageReference => Boolean(item?.imageAsset));
+  const referenceImages = candidates.slice(0, config.model.maxReferenceImages);
+  const omitted = candidates.slice(config.model.maxReferenceImages);
+  console.info('[reference-context]', JSON.stringify({ shotId: request.shotId, selected: selectedReferences.map(item => ({ id: item.id, type: item.type, textOnly: !item.imageAsset, stale: item.stale })), continuity: request.referenceContext.continuityReference?.id, model: config.model.modelId, referenceImages: referenceImages.map(item => item.id), omitted: omitted.map(item => item.id) }));
+  if (referenceImages.length && !config.model.referenceImageSupport) console.info(`[${provider}] reference assets for shot ${request.shotId} are represented by their current text descriptions; this model does not accept reference-image conditioning.`);
   if (provider === 'grok') {
     const response = await client.images.generate({
       model: config.model.modelId,
@@ -53,4 +57,20 @@ export async function generateImage(provider: ImageProvider, request: ImageGener
   if (image?.url) return { url: image.url, model: config.model.modelId, quality: config.quality, resolution: size as ImageResolution };
   if (image?.b64_json) return { url: `data:image/png;base64,${image.b64_json}`, model: config.model.modelId, quality: config.quality, resolution: size as ImageResolution };
   throw new Error('OpenAI returned no image');
+}
+
+/** Generate a new version from a supplied image without exposing provider payloads outside this adapter. */
+export async function refineImage(provider: ImageProvider, request: ImageGenerationRequest, image: Buffer, filename: string): Promise<ImageGenerationResult> {
+  provider = resolveProvider('imageEditing', { requested: provider, strict: true });
+  const config = resolveImageConfiguration({ provider, preset: request.qualityPreset, modelId: request.modelOverride, resolution: request.resolutionOverride, needsReferenceImages: true });
+  if (!config.model.imageEditingSupport) throw new Error('The selected image model does not support refinement. Choose a compatible model in Advanced image settings.');
+  const client = getImageClient(provider);
+  const bytes = new Uint8Array(image.byteLength); bytes.set(image);
+  const file = new File([bytes], filename, { type: 'image/png' });
+  const size = request.resolutionOverride ?? (request.aspectRatio === '9:16' ? '1024x1536' : request.aspectRatio === '1:1' ? '1024x1024' : '1536x1024');
+  const response = await client.images.edit({ model: config.model.modelId, image: file, prompt: request.prompt, size: size as '1024x1024' | '1024x1536' | '1536x1024', quality: config.quality === 'draft' ? 'low' : config.quality === 'best' ? 'high' : 'medium' } as never);
+  const result = response.data?.[0];
+  if (result?.url) return { url: result.url, model: config.model.modelId, quality: config.quality, resolution: size as ImageResolution };
+  if (result?.b64_json) return { url: `data:image/png;base64,${result.b64_json}`, model: config.model.modelId, quality: config.quality, resolution: size as ImageResolution };
+  throw new Error('OpenAI returned no refined image');
 }
