@@ -25,8 +25,8 @@ function fromVisual(reference: VisualReference, type: 'character' | 'location'):
 
 /** Resolves only the identity records assigned to a shot. This is deliberately
  * provider-neutral so every generation entry point shares the same decision. */
-export function resolveReferenceContext(project: Project, shot: Shot, previous?: Shot): ReferenceContext {
-  const identity = getVisualIdentity(project.id);
+export function resolveReferenceContext(project: Project, shot: Shot, previous?: Shot, conceptId?:string): ReferenceContext {
+  const identity = getVisualIdentity(project.id,conceptId);
   const characterIds = JSON.parse(shot.character_ids || '[]') as string[];
   const characters = characterIds
     .map(id => identity.characters.find(reference => reference.id === id))

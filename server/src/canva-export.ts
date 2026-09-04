@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { db } from './db.js';
-import { getSelectedConcept } from './visual-concepts.js';
+import { getSelectedConcept, requireSelectedConceptId } from './visual-concepts.js';
 import { getVisualIdentity } from './visual-identity.js';
 
 const run = promisify(execFile);
@@ -31,7 +31,7 @@ const activeShotAsset = (shotId: string) => db.prepare(`SELECT a.id,a.storage_pa
 function copyAsset(asset: Asset, target: string) { const source = path.join(storageRoot, asset.storage_path); if (fs.existsSync(source)) { fs.mkdirSync(path.dirname(target), { recursive: true }); fs.copyFileSync(source, target); return true; } return false; }
 
 export function canvaExportSummary(projectId: string) {
-  const shots = db.prepare('SELECT id,image_url,approval_status FROM shots WHERE project_id=? ORDER BY position').all(projectId) as any[];
+  const conceptId=requireSelectedConceptId(projectId); const shots = db.prepare('SELECT id,image_url,approval_status FROM shots WHERE project_id=? AND concept_id=? ORDER BY position').all(projectId,conceptId) as any[];
   return { shots: shots.length, images: shots.filter(shot => Boolean(activeShotAsset(shot.id) || activeAsset('shot', shot.id))).length, missing: shots.filter(shot => !activeShotAsset(shot.id) && !activeAsset('shot', shot.id)).length, approved: shots.filter(shot => shot.approval_status === 'approved').length };
 }
 
@@ -39,8 +39,8 @@ export async function buildCanvaExport(projectId: string, options: ExportOptions
   const project = db.prepare('SELECT * FROM projects WHERE id=?').get(projectId) as any;
   if (!project) throw new Error('Project not found.');
   const include = { images: options.images !== false, guide: options.guide !== false, references: options.references !== false, lyrics: options.lyrics !== false, sunoDescription: options.sunoDescription !== false, alternatives: Boolean(options.alternatives), platformArtwork: options.platformArtwork !== false, platformVariants: Boolean(options.platformVariants) };
-  const identity = getVisualIdentity(projectId), concept = getSelectedConcept(projectId);
-  const shots = db.prepare('SELECT * FROM shots WHERE project_id=? ORDER BY position').all(projectId) as any[];
+  const concept = getSelectedConcept(projectId); if(!concept) throw new Error('Select a visual concept before exporting.'); const conceptId=concept.id, identity = getVisualIdentity(projectId,conceptId);
+  const shots = db.prepare('SELECT * FROM shots WHERE project_id=? AND concept_id=? ORDER BY position').all(projectId,conceptId) as any[];
   const characters = new Map(identity.characters.map(item => [item.id, item])); const locations = new Map(identity.locations.map(item => [item.id, item]));
   const summary = canvaExportSummary(projectId), rootName = `${safeName(project.title)}-canva-export`, temp = fs.mkdtempSync(path.join(os.tmpdir(), 'canva-export-'));
   const root = path.join(temp, rootName), imageDir = path.join(root, '01-storyboard-images'), infoDir = path.join(root, '03-project-info'); fs.mkdirSync(root, { recursive: true });
@@ -53,7 +53,7 @@ export async function buildCanvaExport(projectId: string, options: ExportOptions
   }
   // Artwork is exported separately from storyboard masters. Only the active
   // version is included by default, so a standard Canva handoff stays small.
-  const artworkRows = db.prepare('SELECT id,platform,active_asset_id FROM project_artwork WHERE project_id=?').all(projectId) as any[];
+  const artworkRows = db.prepare('SELECT id,platform,active_asset_id FROM project_artwork WHERE project_id=? AND concept_id=?').all(projectId,conceptId) as any[];
   const artworkPaths: any[] = [];
   if (include.platformArtwork) for (const artwork of artworkRows) {
     const asset = artwork.active_asset_id ? (db.prepare('SELECT id,storage_path,mime_type,version,original_filename FROM image_assets WHERE id=?').get(artwork.active_asset_id) as Asset | undefined) : activeAsset('artwork', artwork.id);
@@ -80,7 +80,7 @@ export async function buildCanvaExport(projectId: string, options: ExportOptions
   const referenceAssets: any[] = [];
   if (include.references) {
     const copyReference = (asset: Asset | undefined, folder: string, name: string, kind: string) => { if (!asset) return null; const relative = `02-reference-images/${folder}/${safeName(name)}.${ext(asset.mime_type)}`; return copyAsset(asset, path.join(root, relative)) ? (referenceAssets.push({ kind, name, path: relative }), relative) : null; };
-    copyReference(activeAsset('style', projectId), 'style', 'visual-style', 'style'); identity.characters.forEach(item => copyReference(activeAsset('reference', item.id), 'characters', item.name, 'character')); identity.locations.forEach(item => copyReference(activeAsset('reference', item.id), 'locations', item.name, 'location'));
+    copyReference(activeAsset('style',conceptId),'style','visual-style','style'); identity.characters.forEach(item => copyReference(activeAsset('reference', item.id), 'characters', item.name, 'character')); identity.locations.forEach(item => copyReference(activeAsset('reference', item.id), 'locations', item.name, 'location'));
   }
   const manifest = { exportVersion: 1, project: { title: project.title, aspectRatio: project.aspect_ratio, storyboardApproach: project.storyboard_approach, publishingTargets: JSON.parse(project.publishing_targets || '[]'), primaryVisualFormat:project.primary_visual_format }, selectedConcept: concept, visualIdentity: { style: identity.style.description, characters: identity.characters.map(item => ({ id: item.id, name: item.name, description: item.description })), locations: identity.locations.map(item => ({ id: item.id, name: item.name, description: item.description })) }, storyboard: { shots: summary.shots }, platformArtwork: artworkPaths, shots: shotData.map(({ shot, characterNames, location, image, status }) => ({ order: shot.position, title: shot.title, timing: { start: shot.start_seconds, end: shot.end_seconds }, activeImage: image, approvalStatus: shot.approval_status, status, characterNames, characterIds: JSON.parse(shot.character_ids || '[]'), location: location ? { id: location.id, name: location.name } : null, section: shot.section, description: shot.description, action: shot.action, shotType: shot.shot_type, camera: shot.camera, mood: shot.mood })), referenceAssets };
   fs.writeFileSync(path.join(root, 'manifest.json'), JSON.stringify(manifest, null, 2)); fs.writeFileSync(path.join(infoDir, 'project.json'), JSON.stringify({ project: manifest.project, selectedConcept: concept, visualIdentity: manifest.visualIdentity }, null, 2));

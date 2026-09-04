@@ -11,7 +11,8 @@ import { reviewStoryboard } from './storyboard-review.js';
 import { type StoryboardPlan, type StoryboardShotContent } from './storyboard-prompts.js';
 import { activateGeneration, addUploadedShotImage, approvedShotsNeedingFinal, deleteGeneration, generateSingle, generationEstimate, refineSingle, getBatch, listGenerations, shotsMissingImages, startBatch } from './image-generation.js';
 import { acknowledgeVisualReferenceImage, activateVisualReferenceAsset, clearVisualReferenceImage, createReference, deleteReference, ensureVisualIdentity, generateVisualReference, getVisualIdentity, setVisualLock, updateReference, updateVisualStyle, uploadVisualReference } from './visual-identity.js';
-import { createConcept, deleteConcept, generateConceptImage, generateConcepts, getConcepts, getSelectedConcept, regenerateConcept, selectConcept, updateConcept, uploadConceptImage } from './visual-concepts.js';
+import { ConceptInputSchema, createConcept, deleteConcept, generateConceptImage, generateConcepts, getConcepts, getSelectedConcept, parseExternalConceptResponse, regenerateConcept, requireSelectedConceptId, selectConcept, updateConcept, uploadConceptImage } from './visual-concepts.js';
+import { buildExternalConceptPrompt } from './visual-concept-prompts.js';
 import { findAsset, MAX_IMAGE_UPLOAD_BYTES } from './assets.js';
 import { buildCanvaExport, canvaExportSummary } from './canva-export.js';
 import { allPlatformPresets, platformPresets, type PlatformId } from './platform-presets.js';
@@ -76,6 +77,8 @@ app.delete('/api/projects/:id', (req, res) => {
     db.prepare('DELETE FROM image_generation_batches WHERE project_id = ?').run(req.params.id);
     db.prepare('DELETE FROM storyboard_review_issues WHERE review_id IN (SELECT id FROM storyboard_reviews WHERE project_id = ?)').run(req.params.id);
     db.prepare('DELETE FROM storyboard_reviews WHERE project_id = ?').run(req.params.id);
+    db.prepare('DELETE FROM storyboard_plans WHERE project_id = ?').run(req.params.id);
+    db.prepare('DELETE FROM project_artwork WHERE project_id = ?').run(req.params.id);
     db.prepare('DELETE FROM shots WHERE project_id = ?').run(req.params.id);
     db.prepare('DELETE FROM visual_references WHERE project_id = ?').run(req.params.id);
     db.prepare('DELETE FROM visual_identities WHERE project_id = ?').run(req.params.id);
@@ -93,13 +96,12 @@ app.post('/api/projects', (req, res) => {
   const createdAt = new Date().toISOString();
   db.prepare(`INSERT INTO projects (id,title,lyrics,suno_description,visual_style,aspect_ratio,image_provider,image_quality_preset,created_at)
     VALUES (?,?,?,?,?,?,?,?,?)`).run(id, input.title, input.lyrics, input.sunoDescription.trim() || null, input.visualStyle, input.aspectRatio, imageProvider, input.imageQualityPreset, createdAt);
-  ensureVisualIdentity(id, input.visualStyle);
   res.status(201).json({ id });
 });
 
 app.get('/api/projects/:id', (req, res) => {
   const project = requireProject(req.params.id, res); if (!project) return;
-  const shots = (db.prepare('SELECT * FROM shots WHERE project_id = ? ORDER BY position').all(req.params.id) as any[]).map(asShot);
+  const concept=getSelectedConcept(req.params.id); const shots = concept ? (db.prepare('SELECT * FROM shots WHERE project_id=? AND concept_id=? ORDER BY position').all(req.params.id,concept.id) as any[]).map(asShot) : [];
   res.json({ project, shots, storyboardPlan: getStoryboardPlan(req.params.id), visualIdentity: getVisualIdentity(req.params.id), concepts: getConcepts(req.params.id), storyboardReview: getLatestStoryboardReview(req.params.id), artwork: listArtwork(req.params.id) });
 });
 app.get('/api/platform-presets', (_req,res) => res.json(allPlatformPresets));
@@ -154,20 +156,22 @@ app.put('/api/projects/:id/image-settings', (req, res) => {
 });
 
 function asShot(row: any) {
-  const identity = getVisualIdentity(row.project_id); const characterIds = JSON.parse(row.character_ids || '[]'); const locationId = row.location_id ?? null;
+  const identity = getVisualIdentity(row.project_id,row.concept_id); const characterIds = JSON.parse(row.character_ids || '[]'); const locationId = row.location_id ?? null;
   const referencePreview = [...identity.characters.filter(item => characterIds.includes(item.id)), ...identity.locations.filter(item => item.id === locationId), { id: 'visual-style', name: 'Visual Style', description: identity.style.description, image_url: identity.style.image_url }];
   return { id: row.id, order: row.position, startTime: row.start_seconds ?? null, endTime: row.end_seconds ?? null, section: row.section, title: row.title, description: row.description, action: row.action, shotType: row.shot_type, camera: row.camera, mood: row.mood, characterIds, locationId, imageUrl: row.image_url ?? null, generationStatus: row.generation_status || row.status, approvalStatus: row.approval_status || 'unapproved', generations: listGenerations(row.id), referencePreview };
 }
 function shotContent(row: any): StoryboardShotContent { const shot = asShot(row); return { section: shot.section, title: shot.title, description: shot.description, action: shot.action, shotType: shot.shotType, camera: shot.camera, mood: shot.mood, characterIds: shot.characterIds, locationId: shot.locationId }; }
-function getStoryboardPlan(projectId: string): StoryboardPlan | null { const row = db.prepare('SELECT * FROM storyboard_plans WHERE project_id=?').get(projectId) as any; return row ? { approach: row.approach, summary: row.summary, narrativeArc: row.narrative_arc, opening: row.opening, midpoint: row.midpoint, climax: row.climax, ending: row.ending, motifs: JSON.parse(row.motifs), primaryCharacterIds: JSON.parse(row.primary_character_ids), primaryLocationIds: JSON.parse(row.primary_location_ids), pacingNotes: row.pacing_notes } : null; }
-function saveStoryboardPlan(projectId: string, plan: StoryboardPlan) { db.prepare(`INSERT INTO storyboard_plans (project_id,approach,summary,narrative_arc,opening,midpoint,climax,ending,motifs,primary_character_ids,primary_location_ids,pacing_notes,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET approach=excluded.approach,summary=excluded.summary,narrative_arc=excluded.narrative_arc,opening=excluded.opening,midpoint=excluded.midpoint,climax=excluded.climax,ending=excluded.ending,motifs=excluded.motifs,primary_character_ids=excluded.primary_character_ids,primary_location_ids=excluded.primary_location_ids,pacing_notes=excluded.pacing_notes,created_at=excluded.created_at`).run(projectId, plan.approach, plan.summary, plan.narrativeArc, plan.opening, plan.midpoint, plan.climax, plan.ending, JSON.stringify(plan.motifs), JSON.stringify(plan.primaryCharacterIds), JSON.stringify(plan.primaryLocationIds), plan.pacingNotes, new Date().toISOString()); }
+function getStoryboardPlan(projectId: string, conceptId=getSelectedConcept(projectId)?.id): StoryboardPlan | null { const row = conceptId ? db.prepare('SELECT * FROM storyboard_plans WHERE project_id=? AND concept_id=?').get(projectId,conceptId) as any : null; return row ? { approach: row.approach, summary: row.summary, narrativeArc: row.narrative_arc, opening: row.opening, midpoint: row.midpoint, climax: row.climax, ending: row.ending, motifs: JSON.parse(row.motifs), primaryCharacterIds: JSON.parse(row.primary_character_ids), primaryLocationIds: JSON.parse(row.primary_location_ids), pacingNotes: row.pacing_notes } : null; }
+function saveStoryboardPlan(projectId: string, conceptId:string, plan: StoryboardPlan) { db.prepare(`INSERT INTO storyboard_plans (concept_id,project_id,approach,summary,narrative_arc,opening,midpoint,climax,ending,motifs,primary_character_ids,primary_location_ids,pacing_notes,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(concept_id) DO UPDATE SET approach=excluded.approach,summary=excluded.summary,narrative_arc=excluded.narrative_arc,opening=excluded.opening,midpoint=excluded.midpoint,climax=excluded.climax,ending=excluded.ending,motifs=excluded.motifs,primary_character_ids=excluded.primary_character_ids,primary_location_ids=excluded.primary_location_ids,pacing_notes=excluded.pacing_notes,created_at=excluded.created_at`).run(conceptId,projectId,plan.approach,plan.summary,plan.narrativeArc,plan.opening,plan.midpoint,plan.climax,plan.ending,JSON.stringify(plan.motifs),JSON.stringify(plan.primaryCharacterIds),JSON.stringify(plan.primaryLocationIds),plan.pacingNotes,new Date().toISOString()); }
 function reviewContextSignature(projectId: string) {
+  const conceptId=requireSelectedConceptId(projectId);
   const project = db.prepare('SELECT title,lyrics,suno_description,visual_style FROM projects WHERE id=?').get(projectId);
-  const shots = db.prepare('SELECT id,position,section,title,description,action,shot_type,camera,mood,character_ids,location_id,image_url FROM shots WHERE project_id=? ORDER BY position').all(projectId);
-  return JSON.stringify({ project, plan: getStoryboardPlan(projectId), identity: getVisualIdentity(projectId), concept: getSelectedConcept(projectId), shots });
+  const shots = db.prepare('SELECT id,position,section,title,description,action,shot_type,camera,mood,character_ids,location_id,image_url FROM shots WHERE project_id=? AND concept_id=? ORDER BY position').all(projectId,conceptId);
+  return JSON.stringify({ project, plan: getStoryboardPlan(projectId,conceptId), identity: getVisualIdentity(projectId,conceptId), concept: getSelectedConcept(projectId), shots });
 }
 function getLatestStoryboardReview(projectId: string) {
-  const review = db.prepare('SELECT * FROM storyboard_reviews WHERE project_id=? ORDER BY created_at DESC LIMIT 1').get(projectId) as any;
+  const conceptId=getSelectedConcept(projectId)?.id; if(!conceptId) return null;
+  const review = db.prepare('SELECT * FROM storyboard_reviews WHERE project_id=? AND concept_id=? ORDER BY created_at DESC LIMIT 1').get(projectId,conceptId) as any;
   if (!review) return null;
   const issues = db.prepare('SELECT * FROM storyboard_review_issues WHERE review_id=?').all(review.id).map((issue: any) => ({ id: issue.id, severity: issue.severity, category: issue.category, title: issue.title, description: issue.description, shotIds: JSON.parse(issue.shot_ids), suggestion: issue.suggestion, status: issue.status }));
   return { id: review.id, storyboardId: projectId, createdAt: review.created_at, summary: review.summary, score: review.score, stale: review.context_signature !== reviewContextSignature(projectId), issues };
@@ -175,7 +179,7 @@ function getLatestStoryboardReview(projectId: string) {
 
 const ReferenceInput = z.object({ name: z.string().min(1).max(120), description: z.string().min(1).max(2000) });
 const StyleInput = z.object({ description: z.string().min(1).max(2000) });
-const ConceptInput = z.object({ title: z.string().trim().min(1).max(120), description: z.string().trim().min(1).max(2000), mood: z.string().trim().min(1).max(500), visualStyle: z.string().trim().min(1).max(1000), colorAndLighting: z.string().trim().min(1).max(1000), narrativeDirection: z.string().trim().min(1).max(2000) });
+const ExternalConceptResponseInput = z.object({ response: z.string().trim().min(1).max(50000) });
 const referenceType = z.enum(['character', 'location']);
 
 function requireProject(id: string, res: express.Response) {
@@ -193,6 +197,18 @@ app.get('/api/projects/:id/concepts', (req, res) => {
   if (!requireProject(req.params.id, res)) return;
   res.json(getConcepts(req.params.id));
 });
+app.get('/api/projects/:id/concepts/external-prompt', (req, res) => {
+  const project = requireProject(req.params.id, res); if (!project) return;
+  const existingTitles = getConcepts(project.id).map(concept => concept.title);
+  res.json({ prompt: buildExternalConceptPrompt({ title: project.title, lyrics: project.lyrics, sunoDescription: project.suno_description, visualDirection: project.visual_style, aspectRatio: project.aspect_ratio }, existingTitles) });
+});
+app.post('/api/projects/:id/concepts/import', (req, res) => {
+  const project = requireProject(req.params.id, res); if (!project) return;
+  const { response } = ExternalConceptResponseInput.parse(req.body);
+  const result = parseExternalConceptResponse(response);
+  if ('error' in result) return res.status(400).json({ error: result.error });
+  res.status(201).json({ concept: createConcept(project.id, result.concept) });
+});
 app.post('/api/projects/:id/concepts/generate', async (req, res, next) => {
   try {
     const project = requireProject(req.params.id, res); if (!project) return;
@@ -204,11 +220,11 @@ app.post('/api/projects/:id/concepts/regenerate', async (req, res, next) => {
 });
 app.post('/api/projects/:id/concepts', (req, res) => {
   if (!requireProject(req.params.id, res)) return;
-  res.status(201).json({ concept: createConcept(req.params.id, ConceptInput.parse(req.body)) });
+  res.status(201).json({ concept: createConcept(req.params.id, ConceptInputSchema.parse(req.body)) });
 });
 app.put('/api/projects/:id/concepts/:conceptId', (req, res) => {
   if (!requireProject(req.params.id, res)) return;
-  const concept = updateConcept(req.params.id, req.params.conceptId, ConceptInput.parse(req.body));
+  const concept = updateConcept(req.params.id, req.params.conceptId, ConceptInputSchema.parse(req.body));
   if (!concept) return res.status(404).json({ error: 'Visual concept not found' });
   res.json({ concept });
 });
@@ -352,24 +368,29 @@ app.put('/api/projects/:id/visual-identity/style/lock', (req, res) => {
 
 app.post('/api/projects/:id/storyboard', async (req, res, next) => {
   try {
-    const density = z.enum(['low', 'normal', 'high']).default('normal').parse(req.body?.density);
+    const input = z.object({
+      shotCount: z.number().int().min(1).max(60).optional(),
+      detailLevel: z.number().int().min(0).max(100).default(50),
+      density: z.enum(['low', 'normal', 'high']).default('normal'),
+    }).parse(req.body ?? {});
     const project = requireProject(req.params.id, res); if (!project) return;
 
-    const storyboard = await createStoryboard({
+    const conceptId=requireSelectedConceptId(req.params.id); const storyboard = await createStoryboard({
       project,
-      shotCount: shotCountForDensity(density, project.duration_seconds),
+      shotCount: input.shotCount ?? shotCountForDensity(input.density, project.duration_seconds),
+      detailLevel: input.detailLevel,
       visualIdentity: getVisualIdentity(req.params.id),
       selectedConcept: getSelectedConcept(req.params.id),
     });
 
     const transaction = db.transaction(() => {
-      db.prepare('DELETE FROM shots WHERE project_id = ?').run(req.params.id);
-      saveStoryboardPlan(req.params.id, storyboard.plan);
+      db.prepare('DELETE FROM shots WHERE project_id=? AND concept_id=?').run(req.params.id,conceptId);
+      saveStoryboardPlan(req.params.id,conceptId,storyboard.plan);
       const insert = db.prepare(`INSERT INTO shots
-        (id,project_id,position,start_seconds,end_seconds,section,title,description,action,shot_type,camera,mood,character_ids,location_id,prompt,status,generation_status,approval_status)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending','pending','unapproved')`);
+        (id,project_id,concept_id,position,start_seconds,end_seconds,section,title,description,action,shot_type,camera,mood,character_ids,location_id,prompt,status,generation_status,approval_status)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending','pending','unapproved')`);
       storyboard.shots.forEach((shot, index) => {
-        insert.run(crypto.randomUUID(), req.params.id, index + 1, shot.startTime, shot.endTime, shot.section, shot.title, shot.description, shot.action, shot.shotType, shot.camera, shot.mood, JSON.stringify(shot.characterIds), shot.locationId, '');
+        insert.run(crypto.randomUUID(),req.params.id,conceptId,index+1,shot.startTime,shot.endTime,shot.section,shot.title,shot.description,shot.action,shot.shotType,shot.camera,shot.mood,JSON.stringify(shot.characterIds),shot.locationId,'');
       });
     });
     transaction();
@@ -390,7 +411,7 @@ const ShotInsertInput = z.object({
 app.post('/api/projects/:id/shots', (req, res) => {
   if (!requireProject(req.params.id, res)) return;
   const input = ShotInsertInput.parse(req.body ?? {});
-  const existing = db.prepare('SELECT * FROM shots WHERE project_id=? ORDER BY position').all(req.params.id) as any[];
+  const conceptId=requireSelectedConceptId(req.params.id); const existing = db.prepare('SELECT * FROM shots WHERE project_id=? AND concept_id=? ORDER BY position').all(req.params.id,conceptId) as any[];
   if (existing.length + input.count > 60) return res.status(400).json({ error: `A storyboard can contain at most 60 shots. You can add ${60 - existing.length} more.` });
 
   const reference = input.referenceShotId
@@ -405,14 +426,14 @@ app.post('/api/projects/:id/shots', (req, res) => {
   const insertedIds: string[] = [];
 
   db.transaction(() => {
-    db.prepare('UPDATE shots SET position=position+? WHERE project_id=? AND position>=?').run(input.count, req.params.id, insertAt);
+    db.prepare('UPDATE shots SET position=position+? WHERE project_id=? AND concept_id=? AND position>=?').run(input.count,req.params.id,conceptId,insertAt);
     const insert = db.prepare(`INSERT INTO shots
-      (id,project_id,position,start_seconds,end_seconds,section,title,description,action,shot_type,camera,mood,character_ids,location_id,prompt,status,generation_status,approval_status)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending','pending','unapproved')`);
+      (id,project_id,concept_id,position,start_seconds,end_seconds,section,title,description,action,shot_type,camera,mood,character_ids,location_id,prompt,status,generation_status,approval_status)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending','pending','unapproved')`);
     for (let offset = 0; offset < input.count; offset += 1) {
       const id = crypto.randomUUID();
       insertedIds.push(id);
-      insert.run(id, req.params.id, insertAt + offset, null, null, contextShot?.section || 'Storyboard', 'Untitled shot', 'Describe what happens in this shot.', 'Describe the action in this shot.', 'Choose a shot type', 'Choose camera framing', contextShot?.mood || 'Define the mood', '[]', null, '');
+      insert.run(id,req.params.id,conceptId,insertAt+offset,null,null,contextShot?.section||'Storyboard','Untitled shot','Describe what happens in this shot.','Describe the action in this shot.','Choose a shot type','Choose camera framing',contextShot?.mood||'Define the mood','[]',null,'');
     }
   })();
 
@@ -422,7 +443,7 @@ app.post('/api/projects/:id/shots', (req, res) => {
 
 app.delete('/api/projects/:id/shots/:shotId', (req, res) => {
   if (!requireProject(req.params.id, res)) return;
-  const shot = db.prepare('SELECT * FROM shots WHERE id=? AND project_id=?').get(req.params.shotId, req.params.id) as any;
+  const conceptId=requireSelectedConceptId(req.params.id); const shot = db.prepare('SELECT * FROM shots WHERE id=? AND project_id=? AND concept_id=?').get(req.params.shotId,req.params.id,conceptId) as any;
   if (!shot) return res.status(404).json({ error: 'Storyboard shot not found.' });
 
   const activeGeneration = db.prepare("SELECT id FROM image_generations WHERE shot_id=? AND status IN ('queued','generating')").get(shot.id);
@@ -440,13 +461,13 @@ app.delete('/api/projects/:id/shots/:shotId', (req, res) => {
   db.transaction(() => {
     const issues = db.prepare(`SELECT storyboard_review_issues.id, storyboard_review_issues.shot_ids FROM storyboard_review_issues
       JOIN storyboard_reviews ON storyboard_reviews.id=storyboard_review_issues.review_id
-      WHERE storyboard_reviews.project_id=?`).all(req.params.id) as { id: string; shot_ids: string }[];
+      WHERE storyboard_reviews.project_id=? AND storyboard_reviews.concept_id=?`).all(req.params.id,conceptId) as { id: string; shot_ids: string }[];
     const updateIssue = db.prepare('UPDATE storyboard_review_issues SET shot_ids=? WHERE id=?');
     issues.forEach(issue => updateIssue.run(JSON.stringify((JSON.parse(issue.shot_ids) as string[]).filter(id => id !== shot.id)), issue.id));
     db.prepare('DELETE FROM image_generations WHERE project_id=? AND shot_id=?').run(req.params.id, shot.id);
     db.prepare("DELETE FROM image_assets WHERE project_id=? AND owner_type='shot' AND owner_id=?").run(req.params.id, shot.id);
     db.prepare('DELETE FROM shots WHERE id=? AND project_id=?').run(shot.id, req.params.id);
-    db.prepare('UPDATE shots SET position=position-1 WHERE project_id=? AND position>?').run(req.params.id, shot.position);
+    db.prepare('UPDATE shots SET position=position-1 WHERE project_id=? AND concept_id=? AND position>?').run(req.params.id,conceptId,shot.position);
   })();
 
   assets.forEach(asset => { if (fs.existsSync(asset.storagePath)) fs.unlinkSync(asset.storagePath); });
@@ -460,13 +481,13 @@ app.get('/api/projects/:id/storyboard-review', (req, res) => {
 app.post('/api/projects/:id/storyboard-review', async (req, res, next) => {
   try {
     const project = requireProject(req.params.id, res); if (!project) return;
-    const rows = db.prepare('SELECT * FROM shots WHERE project_id=? ORDER BY position').all(project.id) as any[];
+    const conceptId=requireSelectedConceptId(project.id); const rows = db.prepare('SELECT * FROM shots WHERE project_id=? AND concept_id=? ORDER BY position').all(project.id,conceptId) as any[];
     if (!rows.length) return res.status(400).json({ error: 'Generate a storyboard before reviewing consistency.' });
     const signature = reviewContextSignature(project.id);
     const result = await reviewStoryboard({ project, plan: getStoryboardPlan(project.id), identity: getVisualIdentity(project.id), concept: getSelectedConcept(project.id), shots: rows.map(asShot) });
     const id = crypto.randomUUID(), createdAt = new Date().toISOString();
     db.transaction(() => {
-      db.prepare('INSERT INTO storyboard_reviews (id,project_id,created_at,summary,score,context_signature) VALUES (?,?,?,?,?,?)').run(id, project.id, createdAt, result.summary, result.score ?? null, signature);
+      db.prepare('INSERT INTO storyboard_reviews (id,project_id,concept_id,created_at,summary,score,context_signature) VALUES (?,?,?,?,?,?,?)').run(id,project.id,conceptId,createdAt,result.summary,result.score??null,signature);
       const insert = db.prepare('INSERT INTO storyboard_review_issues (id,review_id,severity,category,title,description,shot_ids,suggestion,status) VALUES (?,?,?,?,?,?,?,?,\'open\')');
       result.issues.forEach(issue => insert.run(crypto.randomUUID(), id, issue.severity, issue.category, issue.title, issue.description, JSON.stringify(issue.shotIds), issue.suggestion));
     })();
@@ -476,7 +497,7 @@ app.post('/api/projects/:id/storyboard-review', async (req, res, next) => {
 app.put('/api/projects/:id/storyboard-review/issues/:issueId', (req, res) => {
   if (!requireProject(req.params.id, res)) return;
   const { status } = z.object({ status: z.enum(['open', 'resolved', 'ignored']) }).parse(req.body);
-  const result = db.prepare(`UPDATE storyboard_review_issues SET status=? WHERE id=? AND review_id IN (SELECT id FROM storyboard_reviews WHERE project_id=?)`).run(status, req.params.issueId, req.params.id);
+  const result = db.prepare(`UPDATE storyboard_review_issues SET status=? WHERE id=? AND review_id IN (SELECT id FROM storyboard_reviews WHERE project_id=? AND concept_id=?)`).run(status,req.params.issueId,req.params.id,requireSelectedConceptId(req.params.id));
   if (!result.changes) return res.status(404).json({ error: 'Consistency issue not found.' });
   res.json(getLatestStoryboardReview(req.params.id));
 });
@@ -485,9 +506,9 @@ const ShotEditInput = z.object({ title: z.string().trim().min(1).max(200).option
 app.put('/api/projects/:id/shots/:shotId', (req, res) => {
   const project = requireProject(req.params.id, res); if (!project) return;
   const input = ShotEditInput.parse(req.body);
-  const shot = db.prepare('SELECT * FROM shots WHERE id = ? AND project_id = ?').get(req.params.shotId, req.params.id) as any;
+  const conceptId=requireSelectedConceptId(req.params.id); const shot = db.prepare('SELECT * FROM shots WHERE id=? AND project_id=? AND concept_id=?').get(req.params.shotId,req.params.id,conceptId) as any;
   if (!shot) return res.status(404).json({ error: 'Storyboard shot not found' });
-  const identity = getVisualIdentity(req.params.id); const characters = new Set(identity.characters.map(item => item.id)); const locations = new Set(identity.locations.map(item => item.id));
+  const identity = getVisualIdentity(req.params.id,conceptId); const characters = new Set(identity.characters.map(item => item.id)); const locations = new Set(identity.locations.map(item => item.id));
   if (input.characterIds.some(id => !characters.has(id)) || (input.locationId && !locations.has(input.locationId))) return res.status(400).json({ error: 'Choose characters and locations from this project.' });
   const visualChanged = shot.description !== input.description || shot.action !== input.action || shot.shot_type !== input.shotType || shot.camera !== input.camera || shot.mood !== input.mood || shot.character_ids !== JSON.stringify(input.characterIds) || (shot.location_id ?? null) !== input.locationId;
   db.transaction(() => {
@@ -502,12 +523,13 @@ app.put('/api/projects/:id/shots/:shotId', (req, res) => {
 
 app.post('/api/projects/:id/shots/:shotId/regenerate', async (req, res, next) => {
   try {
+    const { detailLevel } = z.object({ detailLevel: z.number().int().min(0).max(100).default(50) }).parse(req.body ?? {});
     const project = requireProject(req.params.id, res); if (!project) return;
-    const shots = db.prepare('SELECT * FROM shots WHERE project_id = ? ORDER BY position').all(req.params.id) as any[];
+    const conceptId=requireSelectedConceptId(req.params.id); const shots = db.prepare('SELECT * FROM shots WHERE project_id=? AND concept_id=? ORDER BY position').all(req.params.id,conceptId) as any[];
     const index = shots.findIndex(shot => shot.id === req.params.shotId); if (index < 0) return res.status(404).json({ error: 'Storyboard shot not found' });
     const current = shots[index]; const plan = getStoryboardPlan(req.params.id);
     if (!plan) return res.status(400).json({ error: 'Generate the storyboard before regenerating an individual shot.' });
-    const generated = await regenerateStoryboardShot({ project, visualIdentity: getVisualIdentity(req.params.id), selectedConcept: getSelectedConcept(req.params.id), plan, previous: index ? shotContent(shots[index - 1]) : undefined, current: shotContent(current), next: shots[index + 1] ? shotContent(shots[index + 1]) : undefined });
+    const generated = await regenerateStoryboardShot({ project, detailLevel, visualIdentity: getVisualIdentity(req.params.id), selectedConcept: getSelectedConcept(req.params.id), plan, previous: index ? shotContent(shots[index - 1]) : undefined, current: shotContent(current), next: shots[index + 1] ? shotContent(shots[index + 1]) : undefined });
     db.prepare(`UPDATE shots SET section=?, title=?, description=?, action=?, shot_type=?, camera=?, mood=?, character_ids=?, location_id=?, generation_status=?, status=? WHERE id=?`).run(generated.section, generated.title, generated.description, generated.action, generated.shotType, generated.camera, generated.mood, JSON.stringify(generated.characterIds), generated.locationId, current.image_url ? 'needs_regeneration' : 'pending', current.image_url ? 'stale' : 'pending', current.id);
     res.json(asShot(db.prepare('SELECT * FROM shots WHERE id = ?').get(current.id)));
   } catch (error) { next(error); }
@@ -522,7 +544,7 @@ app.get('/api/projects/:id/image-batches/:batchId', (req, res) => {
 app.post('/api/projects/:id/shots/:shotId/generate-image', async (req, res, next) => {
   try {
     const project = requireProject(req.params.id, res); if (!project) return;
-    const shots = db.prepare('SELECT * FROM shots WHERE project_id=? ORDER BY position').all(project.id) as any[];
+    const conceptId=requireSelectedConceptId(project.id); const shots = db.prepare('SELECT * FROM shots WHERE project_id=? AND concept_id=? ORDER BY position').all(project.id,conceptId) as any[];
     const index = shots.findIndex(shot => shot.id === req.params.shotId);
     if (index < 0) return res.status(404).json({ error: 'Storyboard shot not found' });
     const override = ImageTierOverrideInput.extend({ platform:z.enum(['youtube','youtube-shorts','tiktok','spotify','landscape','vertical','square']).optional() }).parse(req.body ?? {});
@@ -534,7 +556,7 @@ app.post('/api/projects/:id/shots/:shotId/generate-variants', async (req, res, n
   try {
     const project = requireProject(req.params.id, res); if (!project) return;
     const { count, tier, qualityPreset } = ImageTierOverrideInput.extend({ count: z.number().int().min(2).max(4) }).parse(req.body);
-    const shots = db.prepare('SELECT * FROM shots WHERE project_id=? ORDER BY position').all(project.id) as any[];
+    const conceptId=requireSelectedConceptId(project.id); const shots = db.prepare('SELECT * FROM shots WHERE project_id=? AND concept_id=? ORDER BY position').all(project.id,conceptId) as any[];
     const index = shots.findIndex(shot => shot.id === req.params.shotId); if (index < 0) return res.status(404).json({ error: 'Storyboard shot not found' });
     for (let i=0;i<count;i++) await generateSingle(project, shots[index], shots[index - 1], { tier: tier ?? 'DRAFT', qualityPreset });
     res.json(asShot(db.prepare('SELECT * FROM shots WHERE id=?').get(req.params.shotId)));
@@ -544,7 +566,7 @@ app.post('/api/projects/:id/shots/:shotId/refine', async (req, res, next) => {
   try {
     const project = requireProject(req.params.id, res); if (!project) return;
     const { assetId, instruction, qualityPreset } = ImageQualityOverrideInput.extend({ assetId:z.string().min(1), instruction:z.string().min(1).max(2000) }).parse(req.body);
-    const shot = db.prepare('SELECT * FROM shots WHERE id=? AND project_id=?').get(req.params.shotId, project.id) as any;
+    const shot = db.prepare('SELECT * FROM shots WHERE id=? AND project_id=? AND concept_id=?').get(req.params.shotId,project.id,requireSelectedConceptId(project.id)) as any;
     if (!shot) return res.status(404).json({ error:'Storyboard shot not found' });
     await refineSingle(project, shot, assetId, instruction, { qualityPreset });
     res.json(asShot(db.prepare('SELECT * FROM shots WHERE id=?').get(req.params.shotId)));
@@ -571,25 +593,25 @@ app.delete('/api/projects/:id/shots/:shotId/generations/:generationId', (req, re
 });
 app.post('/api/projects/:id/shots/:shotId/approve', (req, res) => {
   if (!requireProject(req.params.id, res)) return;
-  const active = db.prepare("SELECT id FROM image_generations WHERE shot_id=? AND project_id=? AND active=1 AND status='generated'").get(req.params.shotId, req.params.id) as any;
+  const conceptId=requireSelectedConceptId(req.params.id); const active = db.prepare("SELECT id FROM image_generations WHERE shot_id=? AND project_id=? AND concept_id=? AND active=1 AND status='generated'").get(req.params.shotId,req.params.id,conceptId) as any;
   if (!active) return res.status(400).json({ error: 'Generate an image before approving this shot.' });
   const result = db.transaction(() => {
     db.prepare('UPDATE image_generations SET approved=1 WHERE id=?').run(active.id);
-    return db.prepare("UPDATE shots SET approval_status='approved', generation_status='generated', status='ready' WHERE id=? AND project_id=?").run(req.params.shotId, req.params.id);
+    return db.prepare("UPDATE shots SET approval_status='approved', generation_status='generated', status='ready' WHERE id=? AND project_id=? AND concept_id=?").run(req.params.shotId,req.params.id,conceptId);
   })();
   if (!result.changes) return res.status(400).json({ error: 'Generate an image before approving this shot.' });
   res.json(asShot(db.prepare('SELECT * FROM shots WHERE id=?').get(req.params.shotId)));
 });
 app.post('/api/projects/:id/shots/:shotId/needs-regeneration', (req, res) => {
   if (!requireProject(req.params.id, res)) return;
-  const result = db.prepare("UPDATE shots SET generation_status='needs_regeneration', status='stale' WHERE id=? AND project_id=? AND image_url IS NOT NULL").run(req.params.shotId, req.params.id);
+  const result = db.prepare("UPDATE shots SET generation_status='needs_regeneration', status='stale' WHERE id=? AND project_id=? AND concept_id=? AND image_url IS NOT NULL").run(req.params.shotId,req.params.id,requireSelectedConceptId(req.params.id));
   if (!result.changes) return res.status(400).json({ error: 'Generate an image before marking this shot for regeneration.' });
   res.json(asShot(db.prepare('SELECT * FROM shots WHERE id=?').get(req.params.shotId)));
 });
 app.post('/api/projects/:id/shots/bulk-review', (req, res) => {
   if (!requireProject(req.params.id, res)) return;
   const input = z.object({ shotIds: z.array(z.string()).min(1), action: z.enum(['approve', 'needs_regeneration']) }).parse(req.body);
-  const shots = db.prepare(`SELECT * FROM shots WHERE project_id=? AND id IN (${input.shotIds.map(() => '?').join(',')})`).all(req.params.id, ...input.shotIds) as any[];
+  const shots = db.prepare(`SELECT * FROM shots WHERE project_id=? AND concept_id=? AND id IN (${input.shotIds.map(() => '?').join(',')})`).all(req.params.id,requireSelectedConceptId(req.params.id),...input.shotIds) as any[];
   if (input.action === 'approve') {
     const valid = shots.filter(shot => shot.generation_status !== 'generating' && listGenerations(shot.id).some(generation => generation.active && generation.status === 'generated'));
     if (valid.length !== input.shotIds.length) return res.status(400).json({ error: 'Every selected shot needs a finished active image before approval.' });
@@ -607,7 +629,7 @@ app.post('/api/projects/:id/generate-images', async (req, res, next) => {
     const body = ImageTierOverrideInput.extend({ shotIds: z.array(z.string().min(1)).optional() }).parse(req.body ?? {});
     const project = requireProject(req.params.id, res); if (!project) return;
 
-    const allShots = db.prepare('SELECT * FROM shots WHERE project_id = ? ORDER BY position').all(req.params.id) as any[];
+    const conceptId=requireSelectedConceptId(req.params.id); const allShots = db.prepare('SELECT * FROM shots WHERE project_id=? AND concept_id=? ORDER BY position').all(req.params.id,conceptId) as any[];
     const hasExplicitSelection = Boolean(body.shotIds?.length);
     if (hasExplicitSelection && new Set(body.shotIds).size !== body.shotIds!.length) return res.status(400).json({ error: 'Each selected shot can only be included once.' });
     const selected = hasExplicitSelection ? allShots.filter(s => body.shotIds!.includes(s.id)) : shotsMissingImages(project.id);
@@ -620,7 +642,7 @@ app.post('/api/projects/:id/generate-images', async (req, res, next) => {
 app.post('/api/projects/:id/image-generation-estimate', (req, res) => {
   const project = requireProject(req.params.id, res); if (!project) return;
   const input = z.object({ shotIds:z.array(z.string()).optional(), count:z.number().int().min(0).max(60).optional(), tier:z.enum(['DRAFT','STANDARD','FINAL']) }).parse(req.body ?? {});
-  const all = db.prepare('SELECT * FROM shots WHERE project_id=? ORDER BY position').all(project.id) as any[];
+  const conceptId=requireSelectedConceptId(project.id); const all = db.prepare('SELECT * FROM shots WHERE project_id=? AND concept_id=? ORDER BY position').all(project.id,conceptId) as any[];
   const selected = input.shotIds ? all.filter(shot => input.shotIds!.includes(shot.id)) : [];
   res.json(generationEstimate(project, selected, input.tier as ImageTier, input.count ?? selected.length));
 });
@@ -628,7 +650,7 @@ app.post('/api/projects/:id/image-generation-estimate', (req, res) => {
 app.post('/api/projects/:id/shots/:shotId/render-final', async (req, res, next) => {
   try {
     const project = requireProject(req.params.id, res); if (!project) return;
-    const shots = db.prepare('SELECT * FROM shots WHERE project_id=? ORDER BY position').all(project.id) as any[];
+    const conceptId=requireSelectedConceptId(project.id); const shots = db.prepare('SELECT * FROM shots WHERE project_id=? AND concept_id=? ORDER BY position').all(project.id,conceptId) as any[];
     const index = shots.findIndex(shot => shot.id === req.params.shotId); if (index < 0) return res.status(404).json({ error:'Storyboard shot not found.' });
     if (shots[index].approval_status !== 'approved') return res.status(400).json({ error:'Approve the shot before rendering its final image.' });
     const active = listGenerations(shots[index].id).find(item => item.active && item.status === 'generated');
@@ -671,8 +693,9 @@ app.use((error: unknown, req: express.Request, res: express.Response, _next: exp
     const provider: Provider = project?.image_provider === 'grok' ? 'grok' : 'openai';
     return res.status(providerStatus === 'invalid_key' ? 400 : 503).json({ error: providerErrorMessage(provider, providerStatus), code: providerStatus, requestId });
   }
-  const message = error instanceof Error && /^(Add a style|Unlock the|Visual reference not found)/.test(error.message) ? error.message : 'We could not complete that action. Please try again.';
-  res.status(500).json({ error: message, requestId });
+  const expected = error instanceof Error && /^(Add a style|Unlock the|Visual reference not found|Select a visual concept)/.test(error.message);
+  const message = expected ? error.message : 'We could not complete that action. Please try again.';
+  res.status(expected ? 400 : 500).json({ error: message, requestId });
 });
 
 app.listen(3001, () => console.log('API running on http://localhost:3001'));

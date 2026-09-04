@@ -27,6 +27,30 @@ export function buildSingleConceptPrompt(input: ConceptPromptInput, existingTitl
   return `Create one new visual concept for this music video. It must be meaningfully different from these existing concepts: ${existingTitles.join(', ') || 'none'}. Keep it concise and understandable without production jargon.\n\nProject: ${input.title}\nUser's visual direction: ${input.visualDirection}\n${buildSongContext(input)}\n\nReturn ONLY JSON: {"title":"...","description":"...","mood":"...","visualStyle":"...","colorAndLighting":"...","narrativeDirection":"..."}.`;
 }
 
+export function buildExternalConceptPrompt(input: ConceptPromptInput, existingTitles: string[]) {
+  return `Create one visual concept for this music video. Make it a coherent creative direction that could guide the video's visual identity and storyboard. It must be meaningfully different from these existing concepts: ${existingTitles.join(', ') || 'none'}.
+
+The concept must cover:
+- title: a short, memorable name for the concept
+- description: the central visual premise, setting, and defining idea
+- mood: the emotional tone and atmosphere
+- visualStyle: the visual language, medium, aesthetic, and cinematic treatment
+- colorAndLighting: the main color palette and lighting approach
+- narrativeDirection: how the visual idea develops across the song
+
+Keep every field concise, specific, and understandable without production jargon. Do not include image-generation prompts or technical model instructions.
+
+Project: ${input.title}
+Format: ${input.aspectRatio}
+User's visual direction: ${input.visualDirection}
+${input.videoType ? `Video type: ${input.videoType}\n` : ''}${buildSongContext(input)}
+
+Return ONLY one valid JSON object in exactly this structure:
+{"title":"...","description":"...","mood":"...","visualStyle":"...","colorAndLighting":"...","narrativeDirection":"..."}
+
+Do not wrap the JSON in commentary. Do not add any other fields.`;
+}
+
 export function buildSelectedConceptContext(concept?: { title: string; description: string; mood: string; visual_style?: string; color_and_lighting?: string; narrative_direction?: string; visualStyle?: string; colorAndLighting?: string; narrativeDirection?: string } | null) {
   if (!concept) return '';
   return ` Selected creative concept: ${concept.title}. ${concept.description}. Mood: ${concept.mood}. Visual style: ${concept.visual_style ?? concept.visualStyle}. Color and lighting: ${concept.color_and_lighting ?? concept.colorAndLighting}. Narrative direction: ${concept.narrative_direction ?? concept.narrativeDirection}.`;

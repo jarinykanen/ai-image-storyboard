@@ -1,15 +1,19 @@
 import OpenAI from 'openai';
 import { ProviderCapabilityError, requireProviderKey, resolveTierConfiguration, resolveProvider, type ImageQuality, type ImageResolution, type ImageTier, type Provider } from './provider-settings.js';
 import type { ReferenceContext, NormalizedReference } from './reference-context.js';
+import { logAiPrompt } from './ai-prompt-logger.js';
 
 export type ImageProvider = 'openai' | 'grok';
 export type ImageReference = NormalizedReference;
 export type ImageGenerationRequest = { projectId: string; shotId: string; aspectRatio: string; visualStyle: string; concept: { title: string; description: string; mood: string; visualStyle: string; colorAndLighting: string } | null; description: string; action: string; shotType: string; camera: string; mood: string; characters: ImageReference[]; location: ImageReference | null; previousShot: { description: string; action: string; locationId: string | null } | null; referenceContext: ReferenceContext; generationInstructions: string; prompt: string; tier?: ImageTier; qualityPreset?: ImageQuality; modelOverride?: string | null; resolutionOverride?: ImageResolution | null };
 export type ImageGenerationResult = { url: string; provider: ImageProvider; model: string; quality: ImageQuality; resolution: ImageResolution; tier: ImageTier };
 
-export function getTextClient(requestedProvider?: Provider) {
-  const provider = resolveProvider('textGeneration', { requested: requestedProvider, strict: Boolean(requestedProvider) });
-  return new OpenAI({ apiKey: requireProviderKey(provider) });
+export async function generateText(request: { prompt: string; model: string; operation: string; projectId?: string; targetId?: string; requestedProvider?: Provider }) {
+  const provider = resolveProvider('textGeneration', { requested: request.requestedProvider, strict: Boolean(request.requestedProvider) });
+  const client = new OpenAI({ apiKey: requireProviderKey(provider) });
+  logAiPrompt({ provider, model: request.model, operation: request.operation, projectId: request.projectId, targetId: request.targetId }, request.prompt);
+  const response = await client.responses.create({ model: request.model, input: request.prompt });
+  return response.output_text;
 }
 
 function getImageClient(provider: ImageProvider) {
@@ -53,10 +57,12 @@ export async function generateImage(provider: ImageProvider, request: ImageGener
   const omitted = candidates.slice(config.model.maxReferenceImages);
   console.info('[reference-context]', JSON.stringify({ shotId: request.shotId, selected: selectedReferences.map(item => ({ id: item.id, type: item.type, textOnly: !item.imageAsset, stale: item.stale })), continuity: request.referenceContext.continuityReference?.id, model: config.model.modelId, referenceImages: referenceImages.map(item => item.id), omitted: omitted.map(item => item.id) }));
   if (referenceImages.length && !config.model.referenceImageSupport) console.info(`[${provider}] reference assets for shot ${request.shotId} are represented by their current text descriptions; this model does not accept reference-image conditioning.`);
+  const prompt = enforceSingleFrameOutput(request.prompt);
   if (provider === 'grok') {
+    logAiPrompt({ provider, model: config.model.modelId, operation: 'image.generate', projectId: request.projectId, targetId: request.shotId }, prompt);
     const response = await client.images.generate({
       model: config.model.modelId,
-      prompt: enforceSingleFrameOutput(request.prompt),
+      prompt,
       n: 1,
       // xAI accepts provider-specific fields through the OpenAI-compatible API.
       ...({ aspect_ratio: request.aspectRatio, resolution: config.resolution, quality: config.quality } as Record<string, unknown>),
@@ -68,10 +74,16 @@ export async function generateImage(provider: ImageProvider, request: ImageGener
   }
 
   const size = request.resolutionOverride ?? (request.aspectRatio === '9:16' ? '1024x1536' : request.aspectRatio === '1:1' ? '1024x1024' : '1536x1024');
-  const common = { model: config.model.modelId, prompt: enforceSingleFrameOutput(request.prompt), n: 1, size: size as '1024x1024' | '1024x1536' | '1536x1024', quality: config.quality === 'draft' ? 'low' : config.quality === 'best' ? 'high' : 'medium' } as const;
-  const response = referenceImages.length
-    ? await client.images.edit({ ...common, image: await Promise.all(referenceImages.map(referenceFile)) } as never)
-    : await client.images.generate(common as never);
+  const common = { model: config.model.modelId, prompt, n: 1, size: size as '1024x1024' | '1024x1536' | '1536x1024', quality: config.quality === 'draft' ? 'low' : config.quality === 'best' ? 'high' : 'medium' } as const;
+  let response;
+  if (referenceImages.length) {
+    const images = await Promise.all(referenceImages.map(referenceFile));
+    logAiPrompt({ provider, model: config.model.modelId, operation: 'image.edit-with-references', projectId: request.projectId, targetId: request.shotId }, prompt);
+    response = await client.images.edit({ ...common, image: images } as never);
+  } else {
+    logAiPrompt({ provider, model: config.model.modelId, operation: 'image.generate', projectId: request.projectId, targetId: request.shotId }, prompt);
+    response = await client.images.generate(common as never);
+  }
 
   const image = response.data?.[0];
   if (image?.url) return { url: image.url, provider, model: config.model.modelId, quality: config.quality, resolution: size as ImageResolution, tier: config.tier };
@@ -88,7 +100,9 @@ export async function refineImage(provider: ImageProvider, request: ImageGenerat
   const bytes = new Uint8Array(image.byteLength); bytes.set(image);
   const file = new File([bytes], filename, { type: 'image/png' });
   const size = request.resolutionOverride ?? (request.aspectRatio === '9:16' ? '1024x1536' : request.aspectRatio === '1:1' ? '1024x1024' : '1536x1024');
-  const response = await client.images.edit({ model: config.model.modelId, image: file, prompt: enforceSingleFrameOutput(request.prompt), size: size as '1024x1024' | '1024x1536' | '1536x1024', quality: config.quality === 'draft' ? 'low' : config.quality === 'best' ? 'high' : 'medium' } as never);
+  const prompt = enforceSingleFrameOutput(request.prompt);
+  logAiPrompt({ provider, model: config.model.modelId, operation: 'image.refine', projectId: request.projectId, targetId: request.shotId }, prompt);
+  const response = await client.images.edit({ model: config.model.modelId, image: file, prompt, size: size as '1024x1024' | '1024x1536' | '1536x1024', quality: config.quality === 'draft' ? 'low' : config.quality === 'best' ? 'high' : 'medium' } as never);
   const result = response.data?.[0];
   if (result?.url) return { url: result.url, provider, model: config.model.modelId, quality: config.quality, resolution: size as ImageResolution, tier: config.tier };
   if (result?.b64_json) return { url: `data:image/png;base64,${result.b64_json}`, provider, model: config.model.modelId, quality: config.quality, resolution: size as ImageResolution, tier: config.tier };

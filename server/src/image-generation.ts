@@ -6,7 +6,7 @@ import { generateImage, refineImage, type ImageGenerationRequest, type ImageProv
 import { resolveTierConfiguration, resolveProvider, type ImageQuality, type ImageResolution, type ImageTier } from './provider-settings.js';
 import { buildImagePrompt } from './storyboard-prompts.js';
 import { platformPresets, type PlatformId } from './platform-presets.js';
-import { getSelectedConcept } from './visual-concepts.js';
+import { getConcept, requireSelectedConceptId } from './visual-concepts.js';
 import { resolveReferenceContext, type ReferenceContext } from './reference-context.js';
 import { activateAsset, createGeneratedAsset, createUploadedAsset, findAsset } from './assets.js';
 
@@ -40,19 +40,19 @@ export function generationEstimate(project: Project, shots: ShotRow[], tier: Ima
 
 export function approvedShotsNeedingFinal(projectId: string) {
   return db.prepare(`SELECT shots.* FROM shots LEFT JOIN image_generations active ON active.shot_id=shots.id AND active.active=1 AND active.status='generated'
-    WHERE shots.project_id=? AND shots.approval_status='approved' AND shots.generation_status!='generating'
+    WHERE shots.project_id=? AND shots.concept_id=? AND shots.approval_status='approved' AND shots.generation_status!='generating'
       AND (active.id IS NULL OR active.source='uploaded' OR active.tier!='FINAL' OR active.stale=1)
-    ORDER BY shots.position`).all(projectId) as ShotRow[];
+    ORDER BY shots.position`).all(projectId,requireSelectedConceptId(projectId)) as ShotRow[];
 }
 
 export function shotsMissingImages(projectId: string) {
   return db.prepare(`SELECT shots.* FROM shots LEFT JOIN image_generations active ON active.shot_id=shots.id AND active.active=1 AND active.status='generated'
-    WHERE shots.project_id=? AND shots.generation_status!='generating' AND active.id IS NULL ORDER BY shots.position`).all(projectId) as ShotRow[];
+    WHERE shots.project_id=? AND shots.concept_id=? AND shots.generation_status!='generating' AND active.id IS NULL ORDER BY shots.position`).all(projectId,requireSelectedConceptId(projectId)) as ShotRow[];
 }
 
 export function resolveImageRequest(project: Project, shot: ShotRow, previous?: ShotRow, override?: GenerationOverride): ImageGenerationRequest {
-  const concept = getSelectedConcept(project.id);
-  const referenceContext = resolveReferenceContext(project, shot, previous);
+  const concept = getConcept(project.id,shot.concept_id);
+  const referenceContext = resolveReferenceContext(project,shot,previous,shot.concept_id);
   const visualStyle = referenceContext.style.description;
   const selectedConcept = concept ? { title: concept.title, description: concept.description, mood: concept.mood, visualStyle: concept.visualStyle, colorAndLighting: concept.colorAndLighting } : null;
   const preset = override?.platform ? platformPresets[override.platform] : null;
@@ -72,12 +72,14 @@ export function listGenerations(shotId: string) {
 }
 
 function createGeneration(project: Project, shotId: string, override?: GenerationOverride) {
+  const shot=db.prepare('SELECT concept_id FROM shots WHERE id=? AND project_id=?').get(shotId,project.id) as any;
+  if(!shot) throw new Error('Storyboard shot not found.');
   const provider = resolveProvider('imageGeneration', { requested: project.image_provider });
   const config = resolveTierConfiguration({ provider, tier: override?.tier, legacyQuality: override?.qualityPreset ?? (override?.tier ? undefined : project.image_quality_preset), modelId: override?.modelOverride ?? project.image_model_override, resolution: override?.resolutionOverride ?? project.image_resolution_override });
   const version = (db.prepare('SELECT COALESCE(MAX(version), 0) AS version FROM image_generations WHERE shot_id = ?').get(shotId) as any).version + 1;
   const id = crypto.randomUUID();
-  db.prepare('INSERT INTO image_generations (id,project_id,shot_id,provider,model,quality,resolution,tier,status,version,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
-    .run(id, project.id, shotId, provider, config.model.modelId, config.quality, config.resolution, config.tier, 'queued', version, new Date().toISOString());
+  db.prepare('INSERT INTO image_generations (id,project_id,concept_id,shot_id,provider,model,quality,resolution,tier,status,version,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
+    .run(id,project.id,shot.concept_id,shotId,provider,config.model.modelId,config.quality,config.resolution,config.tier,'queued',version,new Date().toISOString());
   return id;
 }
 
@@ -120,8 +122,9 @@ export async function refineSingle(project: Project, shot: ShotRow, assetId: str
 }
 
 export function startBatch(project: Project, shots: ShotRow[], override?: GenerationOverride) {
-  const id = crypto.randomUUID();
-  db.prepare("INSERT INTO image_generation_batches (id,project_id,status,total,created_at) VALUES (?,?,'queued',?,?)").run(id, project.id, shots.length, new Date().toISOString());
+  const id = crypto.randomUUID(), conceptId=shots[0]?.concept_id ?? requireSelectedConceptId(project.id);
+  if(shots.some(shot=>shot.concept_id!==conceptId)) throw new Error('A generation batch can only contain shots from one visual concept.');
+  db.prepare("INSERT INTO image_generation_batches (id,project_id,concept_id,status,total,created_at) VALUES (?,?,?,'queued',?,?)").run(id,project.id,conceptId,shots.length,new Date().toISOString());
   const jobs = shots.map(shot => ({ shot, generationId: createGeneration(project, shot.id, override) }));
   if (jobs.length) void runBatch(id, project, jobs, override);
   else db.prepare("UPDATE image_generation_batches SET status='completed' WHERE id=?").run(id);
@@ -129,7 +132,7 @@ export function startBatch(project: Project, shots: ShotRow[], override?: Genera
 }
 async function runBatch(id: string, project: Project, jobs: { shot: ShotRow; generationId: string }[], override?: GenerationOverride) {
   db.prepare("UPDATE image_generation_batches SET status='generating' WHERE id=?").run(id);
-  const allShots = db.prepare('SELECT * FROM shots WHERE project_id=? ORDER BY position').all(project.id) as ShotRow[];
+  const conceptId=jobs[0]?.shot.concept_id; const allShots = db.prepare('SELECT * FROM shots WHERE project_id=? AND concept_id=? ORDER BY position').all(project.id,conceptId) as ShotRow[];
   const limit = pLimit(project.image_provider === 'grok' ? 4 : 3);
   await Promise.all(jobs.map(({ shot, generationId }) => limit(async () => {
     db.prepare('UPDATE image_generation_batches SET currently_generating=currently_generating+1 WHERE id=?').run(id);
@@ -141,14 +144,14 @@ async function runBatch(id: string, project: Project, jobs: { shot: ShotRow; gen
 }
 export function getBatch(id: string): BatchStatus | null { const row = db.prepare('SELECT * FROM image_generation_batches WHERE id=?').get(id) as any; return row ? { id: row.id, status: row.status, total: row.total, completed: row.completed, failed: row.failed, currentlyGenerating: row.currently_generating } : null; }
 export function activateGeneration(projectId: string, shotId: string, generationId: string) {
-  const generation = db.prepare("SELECT * FROM image_generations WHERE id=? AND shot_id=? AND project_id=? AND status='generated'").get(generationId, shotId, projectId) as any;
+  const generation = db.prepare("SELECT * FROM image_generations WHERE id=? AND shot_id=? AND project_id=? AND concept_id=? AND status='generated'").get(generationId,shotId,projectId,requireSelectedConceptId(projectId)) as any;
   if (!generation) return false;
   const asset = generation.asset_id ? activateAsset(projectId, 'shot', shotId, generation.asset_id) : null;
   const tx = db.transaction(() => { db.prepare('UPDATE image_generations SET active=0 WHERE shot_id=?').run(shotId); db.prepare('UPDATE image_generations SET active=1 WHERE id=?').run(generationId); db.prepare("UPDATE shots SET image_url=?, generation_status='generated', status='ready', approval_status='unapproved' WHERE id=?").run(asset?.url ?? generation.asset_url, shotId); }); tx(); return true;
 }
 
 export function deleteGeneration(projectId: string, shotId: string, generationId: string) {
-  const generation = db.prepare("SELECT * FROM image_generations WHERE id=? AND shot_id=? AND project_id=? AND status='generated'").get(generationId, shotId, projectId) as any;
+  const generation = db.prepare("SELECT * FROM image_generations WHERE id=? AND shot_id=? AND project_id=? AND concept_id=? AND status='generated'").get(generationId,shotId,projectId,requireSelectedConceptId(projectId)) as any;
   if (!generation) return { result: 'not_found' as const };
 
   if (generation.asset_id) {
@@ -179,9 +182,9 @@ export function deleteGeneration(projectId: string, shotId: string, generationId
 }
 
 export function addUploadedShotImage(projectId:string, shotId:string, file:{ buffer:Buffer; mimetype:string; originalname:string }) {
-  if (!db.prepare('SELECT id FROM shots WHERE id=? AND project_id=?').get(shotId,projectId)) return null;
+  const conceptId=requireSelectedConceptId(projectId); if (!db.prepare('SELECT id FROM shots WHERE id=? AND project_id=? AND concept_id=?').get(shotId,projectId,conceptId)) return null;
   const asset=createUploadedAsset({ projectId, ownerType:'shot', ownerId:shotId, data:file.buffer, mimeType:file.mimetype, originalFilename:file.originalname });
   const version=(db.prepare('SELECT COALESCE(MAX(version),0)+1 version FROM image_generations WHERE shot_id=?').get(shotId) as any).version;
-  db.transaction(()=>{ db.prepare('UPDATE image_generations SET active=0 WHERE shot_id=?').run(shotId); db.prepare("INSERT INTO image_generations (id,project_id,shot_id,provider,model,quality,resolution,asset_url,asset_id,source,original_filename,status,version,active,approved,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,'generated',?,?,0,?)").run(crypto.randomUUID(),projectId,shotId,'uploaded','Uploaded','standard','original',asset.url,asset.id,'uploaded',asset.originalFilename,version,1,new Date().toISOString()); db.prepare("UPDATE shots SET image_url=?,status='ready',generation_status='generated',approval_status='unapproved' WHERE id=?").run(asset.url,shotId); })();
+  db.transaction(()=>{ db.prepare('UPDATE image_generations SET active=0 WHERE shot_id=?').run(shotId); db.prepare("INSERT INTO image_generations (id,project_id,concept_id,shot_id,provider,model,quality,resolution,asset_url,asset_id,source,original_filename,status,version,active,approved,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'generated',?,?,0,?)").run(crypto.randomUUID(),projectId,conceptId,shotId,'uploaded','Uploaded','standard','original',asset.url,asset.id,'uploaded',asset.originalFilename,version,1,new Date().toISOString()); db.prepare("UPDATE shots SET image_url=?,status='ready',generation_status='generated',approval_status='unapproved' WHERE id=?").run(asset.url,shotId); })();
   return asset;
 }

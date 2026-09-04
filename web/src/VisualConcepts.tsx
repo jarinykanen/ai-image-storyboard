@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
 import './concepts.css';
 import { WorkspaceHeader } from './AppLayout';
-import { Alert, Badge, Button, FileButton, Group, Paper, Select, Stack, Text, Textarea } from '@mantine/core';
+import { Alert, Badge, Button, FileButton, Group, Modal, Paper, Select, Stack, Text, Textarea } from '@mantine/core';
 import { ConfirmModal } from './ConfirmModal';
 import { ImageGenerationModal, type ImageQuality } from './ImageGenerationModal';
 
-export type VisualConcept = { id: string; title: string; description: string; mood: string; visualStyle: string; colorAndLighting: string; narrativeDirection: string; referenceImageUrl: string | null; status: 'generating' | 'generated' | 'selected' | 'failed'; imageStatus: 'pending' | 'generating' | 'generated' | 'failed'; source: 'ai' | 'manual'; imageOutdated: boolean; imageAssets:{id:string;active:boolean;tier?:'DRAFT'|'STANDARD'|'FINAL'|null}[] };
+export type VisualConcept = { id: string; title: string; description: string; mood: string; visualStyle: string; colorAndLighting: string; narrativeDirection: string; referenceImageUrl: string | null; status: 'generating' | 'generated' | 'selected' | 'failed'; imageStatus: 'pending' | 'generating' | 'generated' | 'failed'; source: 'ai' | 'manual'; imageOutdated: boolean; imageAssets:{id:string;active:boolean;tier?:'DRAFT'|'STANDARD'|'FINAL'|null}[]; workspaceSummary:{references:number;shots:number;images:number;artwork:number} };
 type ConceptFields = Pick<VisualConcept, 'title' | 'description' | 'mood' | 'visualStyle' | 'colorAndLighting' | 'narrativeDirection'>;
 type Props = { projectId: string; concepts: VisualConcept[]; defaultQuality: ImageQuality; onRefresh: () => Promise<void> };
 const API = 'http://localhost:3001/api';
@@ -77,7 +77,7 @@ function ConceptCard({ projectId, concept, onRefresh, onEdit }: { projectId: str
       {concept.imageOutdated && <p className="outdated-image">Concept changed since this image was created.</p>}
       {error && <div className="inline-error">{error}</div>}
       <Group className="concept-card-actions" gap="sm" grow>
-        <Button loading={busy} disabled={concept.status === 'selected'} onClick={() => void run(() => request(`${base}/select`))}>Select</Button>
+        <Button loading={busy} disabled={concept.status === 'selected'} onClick={() => void run(() => request(`${base}/select`))}>{concept.status === 'selected' ? 'Current direction' : 'Open direction'}</Button>
         <Button variant="default" disabled={busy} onClick={onEdit}>Edit</Button>
       </Group>
     </div>
@@ -158,7 +158,7 @@ function ConceptEditView({ projectId, concept, defaultQuality, onRefresh, onBack
     <ImageGenerationModal opened={confirmAction === 'image'} projectId={projectId} imageCount={1} defaultQuality={activeAsset?.tier==='FINAL'?'best':activeAsset?.tier==='STANDARD'?'standard':'draft'} title={concept.referenceImageUrl ? 'Regenerate preview image?' : 'Generate preview image?'} message="Generate 1 preview image as a new version? This is a paid generation action." confirmLabel="Generate 1 image" loading={busy} onCancel={() => setConfirmAction(null)} onConfirm={generateImage} />
     <ImageGenerationModal opened={confirmAction === 'variants'} projectId={projectId} imageCount={Number(variantCount)} defaultQuality="draft" title="Generate preview variants?" message={`Generate ${variantCount} Draft preview images? Variants start in Draft to keep iteration inexpensive.`} confirmLabel={`Generate ${variantCount} images`} loading={busy} onCancel={() => setConfirmAction(null)} onConfirm={generateVariants} />
     <ConfirmModal opened={confirmAction === 'text'} title="Regenerate concept text?" message="Replace this concept's current text with a newly generated direction? Its existing preview image will be marked as outdated." confirmLabel="Regenerate concept" loading={busy} onCancel={() => setConfirmAction(null)} onConfirm={regenerateText} />
-    <ConfirmModal opened={confirmAction === 'delete'} title="Delete concept?" message={`Delete ${concept.title}? This cannot be undone.`} confirmLabel="Delete" confirmColor="red" loading={busy} onCancel={() => setConfirmAction(null)} onConfirm={deleteConcept} />
+    <ConfirmModal opened={confirmAction === 'delete'} title="Delete concept and workspace?" message={`Delete ${concept.title} and its workspace? This permanently removes ${concept.workspaceSummary.references} references, ${concept.workspaceSummary.shots} shots, ${concept.workspaceSummary.images} workspace images, and ${concept.workspaceSummary.artwork} artwork items.`} confirmLabel="Delete concept and workspace" confirmColor="red" loading={busy} onCancel={() => setConfirmAction(null)} onConfirm={deleteConcept} />
   </>;
 }
 
@@ -169,20 +169,95 @@ export function VisualConcepts({ projectId, concepts, defaultQuality, onRefresh 
   const [confirmingGeneration, setConfirmingGeneration] = useState(false);
   const [form, setForm] = useState<ConceptFields>(emptyConcept);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [externalOpened, setExternalOpened] = useState(false);
+  const [externalPrompt, setExternalPrompt] = useState('');
+  const [externalResponse, setExternalResponse] = useState('');
+  const [externalBusy, setExternalBusy] = useState<'prompt' | 'copy' | 'import' | null>(null);
+  const [externalMessage, setExternalMessage] = useState('');
+  const [externalError, setExternalError] = useState('');
   const run = async (action: () => Promise<unknown>) => { setBusy(true); setError(''); try { await action(); await onRefresh(); } catch (e) { setError(e instanceof Error ? e.message : 'Could not complete that action.'); } finally { setBusy(false); } };
   const generateAll = () => void run(() => request(`/projects/${projectId}/concepts/generate`)).finally(() => setConfirmingGeneration(false));
   const saveManual = () => run(async () => { await request(`/projects/${projectId}/concepts`, 'POST', form); setForm(emptyConcept); setCreating(false); });
   const valid = Object.values(form).every(value => value.trim());
   const editingConcept = concepts.find(concept => concept.id === editingId);
 
+  const openExternal = async () => {
+    setExternalOpened(true);
+    setExternalPrompt('');
+    setExternalResponse('');
+    setExternalMessage('');
+    setExternalError('');
+    setExternalBusy('prompt');
+    try {
+      const result = await request(`/projects/${projectId}/concepts/external-prompt`, 'GET') as { prompt: string };
+      setExternalPrompt(result.prompt);
+    } catch (e) {
+      setExternalError(e instanceof Error ? e.message : 'Could not prepare the prompt.');
+    } finally {
+      setExternalBusy(null);
+    }
+  };
+  const copyExternalPrompt = async () => {
+    setExternalBusy('copy');
+    setExternalMessage('');
+    setExternalError('');
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard access is unavailable. Select and copy the prompt from the box instead.');
+      await navigator.clipboard.writeText(externalPrompt);
+      setExternalMessage('Prompt copied. Paste it into the AI of your choice.');
+    } catch (e) {
+      setExternalError(e instanceof Error ? e.message : 'Could not copy automatically. Select and copy the prompt from the box instead.');
+    } finally {
+      setExternalBusy(null);
+    }
+  };
+  const importExternalConcept = async () => {
+    setExternalBusy('import');
+    setExternalMessage('');
+    setExternalError('');
+    try {
+      await request(`/projects/${projectId}/concepts/import`, 'POST', { response: externalResponse });
+      await onRefresh();
+      setExternalOpened(false);
+    } catch (e) {
+      setExternalError(e instanceof Error ? e.message : 'Could not import the concept.');
+    } finally {
+      setExternalBusy(null);
+    }
+  };
+
   if (editingConcept) return <ConceptEditView key={editingConcept.id} projectId={projectId} concept={editingConcept} defaultQuality={defaultQuality} onRefresh={onRefresh} onBack={() => setEditingId(null)} />;
 
   return <>
-    <WorkspaceHeader title="Concepts" description="Choose a creative direction for the video. Text concepts never use image-generation credits." actions={<><Button variant="default" onClick={() => setCreating(true)} disabled={busy}>+ Create my own</Button><Button onClick={() => setConfirmingGeneration(true)} disabled={busy}>Generate 3 concepts</Button></>} />
+    <WorkspaceHeader title="Concepts" description="Choose a creative direction for the video. Text concepts never use image-generation credits." actions={<><Button variant="default" onClick={() => void openExternal()} disabled={busy}>Use another AI</Button><Button variant="default" onClick={() => setCreating(true)} disabled={busy}>+ Create my own</Button><Button onClick={() => setConfirmingGeneration(true)} disabled={busy}>Generate 3 concepts</Button></>} />
     {busy && <div className="notice">Creating text concepts…</div>}{error && <div className="inline-error notice">{error}</div>}
     {!concepts.length && !creating && <section className="panel empty-concepts"><h2>Start with a creative direction</h2><p>Generate three AI text concepts, or define your own. You can add more concepts later.</p><div className="card-actions"><Button disabled={busy} onClick={() => setConfirmingGeneration(true)}>Generate 3 concepts with AI</Button><Button variant="default" disabled={busy} onClick={() => setCreating(true)}>+ Create my own concept</Button></div></section>}
     {creating && <section className="panel manual-concept"><h2>Create my own concept</h2><ConceptForm value={form} onChange={setForm} /><div className="card-actions"><Button disabled={busy || !valid} onClick={saveManual}>Create concept</Button><Button variant="default" disabled={busy} onClick={() => { setForm(emptyConcept); setCreating(false); }}>Cancel</Button></div></section>}
     <section className="concept-grid">{concepts.map(concept => <ConceptCard key={concept.id} projectId={projectId} concept={concept} onRefresh={onRefresh} onEdit={() => setEditingId(concept.id)} />)}</section>
-    <ConfirmModal opened={confirmingGeneration} title="Generate visual concepts?" message="Generate 3 new text concepts? Existing AI-generated concepts will be replaced; manually created concepts will be kept. This does not use image-generation credits." confirmLabel="Generate 3 concepts" loading={busy} onCancel={() => setConfirmingGeneration(false)} onConfirm={generateAll} />
+    <Modal opened={externalOpened} onClose={() => { if (externalBusy !== 'import') setExternalOpened(false); }} title="Create a concept with another AI" size="xl" centered closeOnClickOutside={externalBusy !== 'import'} closeOnEscape={externalBusy !== 'import'}>
+      <Stack gap="lg">
+        <div>
+          <Text fw={600}>1. Copy the ready-made prompt</Text>
+          <Text size="sm" c="dimmed">It includes this project's creative context and tells the AI how to format a concept for import.</Text>
+        </div>
+        <Textarea aria-label="Concept prompt" value={externalPrompt} readOnly autosize minRows={7} maxRows={12} placeholder={externalBusy === 'prompt' ? 'Preparing prompt…' : 'Prompt unavailable'} />
+        <Group justify="space-between">
+          <Text size="sm" c="dimmed">No generation happens in this app when you copy the prompt.</Text>
+          <Button variant="default" loading={externalBusy === 'copy'} disabled={!externalPrompt || externalBusy !== null} onClick={() => void copyExternalPrompt()}>Copy prompt</Button>
+        </Group>
+        <div>
+          <Text fw={600}>2. Paste the AI response</Text>
+          <Text size="sm" c="dimmed">Paste the complete JSON response. Importing creates one editable concept and does not generate an image.</Text>
+        </div>
+        <Textarea label="AI response" value={externalResponse} onChange={event => setExternalResponse(event.target.value)} autosize minRows={7} maxRows={14} placeholder={'{"title":"…","description":"…","mood":"…","visualStyle":"…","colorAndLighting":"…","narrativeDirection":"…"}'} />
+        {externalMessage && <Alert color="green">{externalMessage}</Alert>}
+        {externalError && <Alert color="red">{externalError}</Alert>}
+        <Group justify="flex-end">
+          <Button variant="default" disabled={externalBusy === 'import'} onClick={() => setExternalOpened(false)}>Cancel</Button>
+          <Button loading={externalBusy === 'import'} disabled={!externalResponse.trim() || externalBusy !== null} onClick={() => void importExternalConcept()}>Import concept</Button>
+        </Group>
+      </Stack>
+    </Modal>
+    <ConfirmModal opened={confirmingGeneration} title="Generate visual concepts?" message="Generate 3 new text concepts? Unused AI-generated concepts will be replaced. Concepts with their own workspace or preview images will be kept. This does not use image-generation credits." confirmLabel="Generate 3 concepts" loading={busy} onCancel={() => setConfirmingGeneration(false)} onConfirm={generateAll} />
   </>;
 }

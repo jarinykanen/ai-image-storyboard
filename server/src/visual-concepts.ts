@@ -1,25 +1,31 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { z } from 'zod';
 import { db } from './db.js';
-import { generateImage, getTextClient, type ImageProvider } from './providers.js';
+import { generateImage, generateText, type ImageProvider } from './providers.js';
 import type { ImageQuality } from './provider-settings.js';
 import { buildConceptImagePrompt, buildConceptTextPrompt, buildSingleConceptPrompt } from './visual-concept-prompts.js';
 import { createGeneratedAsset, createUploadedAsset, listAssets } from './assets.js';
 
-const ConceptsSchema = z.object({ concepts: z.array(z.object({
+export const ConceptInputSchema = z.object({
+  title: z.string().trim().min(1).max(120), description: z.string().trim().min(1).max(2000), mood: z.string().trim().min(1).max(500),
+  visualStyle: z.string().trim().min(1).max(1000), colorAndLighting: z.string().trim().min(1).max(1000), narrativeDirection: z.string().trim().min(1).max(2000),
+});
+const ConceptSchema = z.object({
   title: z.string().min(1), description: z.string().min(1), mood: z.string().min(1),
   visualStyle: z.string().min(1), colorAndLighting: z.string().min(1), narrativeDirection: z.string().min(1),
-})).length(3) });
-const ConceptSchema = ConceptsSchema.shape.concepts.element;
+});
+const ConceptsSchema = z.object({ concepts: z.array(ConceptSchema).length(3) });
 
 export type VisualConcept = {
   id: string; title: string; description: string; mood: string; visualStyle: string;
   colorAndLighting: string; narrativeDirection: string; referenceImageUrl: string | null;
   status: 'generating' | 'generated' | 'selected' | 'failed'; imageStatus: 'pending' | 'generating' | 'generated' | 'failed';
-  source: 'ai' | 'manual'; imageOutdated: boolean; imageAssets: ReturnType<typeof listAssets>;
+  source: 'ai' | 'manual'; imageOutdated: boolean; imageAssets: ReturnType<typeof listAssets>; workspaceSummary:{references:number;shots:number;images:number;artwork:number};
 };
 
-export type ConceptInput = z.infer<typeof ConceptSchema>;
+export type ConceptInput = z.infer<typeof ConceptInputSchema>;
 const asText = (value: unknown) => typeof value === 'string' ? value : '';
 const conceptSignature = (concept: Pick<ConceptInput, 'title' | 'description' | 'mood' | 'visualStyle' | 'colorAndLighting' | 'narrativeDirection'>) =>
   JSON.stringify([concept.title, concept.description, concept.mood, concept.visualStyle, concept.colorAndLighting, concept.narrativeDirection]);
@@ -30,26 +36,64 @@ const asConcept = (row: any): VisualConcept => ({
   referenceImageUrl: row.reference_image_url ?? null, status: row.status, imageStatus: row.image_status, source: row.source ?? 'ai',
   imageOutdated: Boolean(row.reference_image_url && row.image_concept_signature !== conceptSignature({ title: asText(row.title), description: asText(row.description), mood: asText(row.mood), visualStyle: asText(row.visual_style), colorAndLighting: asText(row.color_and_lighting), narrativeDirection: asText(row.narrative_direction) })),
   imageAssets: listAssets('concept', row.id),
+  workspaceSummary:{
+    references:(db.prepare('SELECT COUNT(*) count FROM visual_references WHERE concept_id=?').get(row.id) as any).count,
+    shots:(db.prepare('SELECT COUNT(*) count FROM shots WHERE concept_id=?').get(row.id) as any).count,
+    images:(db.prepare("SELECT COUNT(*) count FROM image_assets WHERE concept_id=? AND owner_type!='concept'").get(row.id) as any).count,
+    artwork:(db.prepare('SELECT COUNT(*) count FROM project_artwork WHERE concept_id=?').get(row.id) as any).count,
+  },
 });
 
 export function getConcepts(projectId: string) {
   return (db.prepare('SELECT * FROM visual_concepts WHERE project_id = ? ORDER BY created_at').all(projectId) as any[]).map(asConcept);
 }
 
-export function getSelectedConcept(projectId: string) {
-  const row = db.prepare("SELECT * FROM visual_concepts WHERE project_id = ? AND status = 'selected'").get(projectId) as any;
+export function getConcept(projectId:string,conceptId:string) {
+  const row=db.prepare('SELECT * FROM visual_concepts WHERE id=? AND project_id=?').get(conceptId,projectId) as any;
   return row ? asConcept(row) : null;
 }
 
+export function getSelectedConcept(projectId: string) {
+  const row = db.prepare(`SELECT visual_concepts.* FROM projects JOIN visual_concepts
+    ON visual_concepts.id=projects.selected_concept_id AND visual_concepts.project_id=projects.id WHERE projects.id=?`).get(projectId) as any;
+  return row ? asConcept(row) : null;
+}
+
+export function getSelectedConceptId(projectId: string) { return getSelectedConcept(projectId)?.id ?? null; }
+export function requireSelectedConceptId(projectId: string) {
+  const conceptId = getSelectedConceptId(projectId);
+  if (!conceptId) throw new Error('Select a visual concept before working on its visual identity, storyboard, or artwork.');
+  return conceptId;
+}
+
+export function parseExternalConceptResponse(response: string): { concept: ConceptInput } | { error: string } {
+  const fenced = response.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fenced?.[1] ?? response);
+  } catch {
+    return { error: 'The response is not valid JSON. Paste the complete JSON object from the AI and try again.' };
+  }
+  const result = ConceptInputSchema.strict().safeParse(parsed);
+  return result.success
+    ? { concept: result.data }
+    : { error: 'The response must contain only title, description, mood, visualStyle, colorAndLighting, and narrativeDirection, with a value for each field.' };
+}
+
 export async function generateConcepts(project: any) {
-  const client = getTextClient();
-  const response = await client.responses.create({ model: 'gpt-5.6-terra', input: buildConceptTextPrompt({ title: project.title, lyrics: project.lyrics, sunoDescription: project.suno_description, visualDirection: project.visual_style, aspectRatio: project.aspect_ratio }) });
-  const text = response.output_text.trim().replace(/^```json\s*/i, '').replace(/```$/, '').trim();
+  const prompt = buildConceptTextPrompt({ title: project.title, lyrics: project.lyrics, sunoDescription: project.suno_description, visualDirection: project.visual_style, aspectRatio: project.aspect_ratio });
+  const response = await generateText({ model: 'gpt-5.6-terra', prompt, operation: 'concepts.generate', projectId: project.id });
+  const text = response.trim().replace(/^```json\s*/i, '').replace(/```$/, '').trim();
   const { concepts } = ConceptsSchema.parse(JSON.parse(text));
   const createdAt = new Date().toISOString();
   const ids = concepts.map(() => crypto.randomUUID());
   db.transaction(() => {
-    db.prepare("DELETE FROM visual_concepts WHERE project_id = ? AND source = 'ai'").run(project.id);
+    const candidates = db.prepare("SELECT id FROM visual_concepts WHERE project_id=? AND source='ai' AND status!='selected'").all(project.id) as {id:string}[];
+    const hasWorkspace = db.prepare(`SELECT 1 FROM visual_identities WHERE concept_id=? UNION ALL SELECT 1 FROM visual_references WHERE concept_id=?
+      UNION ALL SELECT 1 FROM shots WHERE concept_id=? UNION ALL SELECT 1 FROM project_artwork WHERE concept_id=?
+      UNION ALL SELECT 1 FROM image_assets WHERE concept_id=? LIMIT 1`);
+    const remove = db.prepare('DELETE FROM visual_concepts WHERE id=?');
+    candidates.forEach(({id}) => { if (!hasWorkspace.get(id,id,id,id,id)) remove.run(id); });
     const insert = db.prepare(`INSERT INTO visual_concepts (id, project_id, title, description, mood, visual_style, color_and_lighting, narrative_direction, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ai', ?)`);
     concepts.forEach((concept, index) => insert.run(ids[index], project.id, concept.title, concept.description, concept.mood, concept.visualStyle, concept.colorAndLighting, concept.narrativeDirection, createdAt));
   })();
@@ -67,14 +111,32 @@ export function updateConcept(projectId: string, conceptId: string, input: Conce
   const result = db.prepare(`UPDATE visual_concepts SET title = ?, description = ?, mood = ?, visual_style = ?, color_and_lighting = ?, narrative_direction = ? WHERE id = ? AND project_id = ?`)
     .run(input.title, input.description, input.mood, input.visualStyle, input.colorAndLighting, input.narrativeDirection, conceptId, projectId);
   if (result.changes && db.prepare("SELECT id FROM visual_concepts WHERE id=? AND status='selected'").get(conceptId)) {
-    db.prepare("UPDATE image_generations SET stale=1 WHERE project_id=? AND tier='FINAL'").run(projectId);
-    db.prepare("UPDATE image_assets SET stale=1 WHERE id IN (SELECT asset_id FROM image_generations WHERE project_id=? AND tier='FINAL')").run(projectId);
+    db.prepare("UPDATE image_generations SET stale=1 WHERE concept_id=? AND tier='FINAL'").run(conceptId);
+    db.prepare("UPDATE image_assets SET stale=1 WHERE id IN (SELECT asset_id FROM image_generations WHERE concept_id=? AND tier='FINAL')").run(conceptId);
   }
   return result.changes ? getConcepts(projectId).find(concept => concept.id === conceptId)! : null;
 }
 
 export function deleteConcept(projectId: string, conceptId: string) {
-  return db.prepare('DELETE FROM visual_concepts WHERE id = ? AND project_id = ?').run(conceptId, projectId).changes > 0;
+  if (!db.prepare('SELECT id FROM visual_concepts WHERE id=? AND project_id=?').get(conceptId, projectId)) return false;
+  const assets = db.prepare('SELECT storage_path FROM image_assets WHERE concept_id=?').all(conceptId) as {storage_path:string}[];
+  db.transaction(() => {
+    db.prepare('UPDATE projects SET selected_concept_id=NULL WHERE id=? AND selected_concept_id=?').run(projectId,conceptId);
+    db.prepare('DELETE FROM storyboard_review_issues WHERE review_id IN (SELECT id FROM storyboard_reviews WHERE concept_id=?)').run(conceptId);
+    db.prepare('DELETE FROM storyboard_reviews WHERE concept_id=?').run(conceptId);
+    db.prepare('DELETE FROM image_generations WHERE concept_id=?').run(conceptId);
+    db.prepare('DELETE FROM image_generation_batches WHERE concept_id=?').run(conceptId);
+    db.prepare('DELETE FROM image_assets WHERE concept_id=?').run(conceptId);
+    db.prepare('DELETE FROM project_artwork WHERE concept_id=?').run(conceptId);
+    db.prepare('DELETE FROM shots WHERE concept_id=?').run(conceptId);
+    db.prepare('DELETE FROM storyboard_plans WHERE concept_id=?').run(conceptId);
+    db.prepare('DELETE FROM visual_references WHERE concept_id=?').run(conceptId);
+    db.prepare('DELETE FROM visual_identities WHERE concept_id=?').run(conceptId);
+    db.prepare('DELETE FROM visual_concepts WHERE id=? AND project_id=?').run(conceptId, projectId);
+  })();
+  const storageRoot = path.resolve('data','projects');
+  assets.forEach(asset => { const file=path.join(storageRoot,asset.storage_path); if(fs.existsSync(file)) fs.unlinkSync(file); });
+  return true;
 }
 
 export function selectConcept(projectId: string, conceptId: string) {
@@ -83,12 +145,11 @@ export function selectConcept(projectId: string, conceptId: string) {
     if (!found) return false;
     db.prepare("UPDATE visual_concepts SET status = 'generated' WHERE project_id = ? AND status = 'selected'").run(projectId);
     db.prepare("UPDATE visual_concepts SET status = 'selected' WHERE id = ? AND project_id = ?").run(conceptId, projectId);
+    db.prepare('UPDATE projects SET selected_concept_id=? WHERE id=?').run(conceptId,projectId);
+    const concept = db.prepare('SELECT visual_style FROM visual_concepts WHERE id=?').get(conceptId) as any;
+    db.prepare('INSERT OR IGNORE INTO visual_identities (concept_id,project_id,style_description) VALUES (?,?,?)').run(conceptId, projectId, concept.visual_style || '');
     return true;
   })();
-  if (selected) {
-    db.prepare("UPDATE image_generations SET stale=1 WHERE project_id=? AND tier='FINAL'").run(projectId);
-    db.prepare("UPDATE image_assets SET stale=1 WHERE id IN (SELECT asset_id FROM image_generations WHERE project_id=? AND tier='FINAL')").run(projectId);
-  }
   return selected;
 }
 
@@ -96,8 +157,9 @@ export async function regenerateConcept(project: any, conceptId: string) {
   const current = db.prepare('SELECT id FROM visual_concepts WHERE id = ? AND project_id = ?').get(conceptId, project.id);
   if (!current) throw new Error('Visual concept not found.');
   const otherTitles = (db.prepare('SELECT title FROM visual_concepts WHERE project_id = ? AND id != ?').all(project.id, conceptId) as any[]).map(row => row.title);
-  const response = await getTextClient().responses.create({ model: 'gpt-5.6-terra', input: buildSingleConceptPrompt({ title: project.title, lyrics: project.lyrics, sunoDescription: project.suno_description, visualDirection: project.visual_style, aspectRatio: project.aspect_ratio }, otherTitles) });
-  const concept = ConceptSchema.parse(JSON.parse(response.output_text.trim().replace(/^```json\s*/i, '').replace(/```$/, '').trim()));
+  const prompt = buildSingleConceptPrompt({ title: project.title, lyrics: project.lyrics, sunoDescription: project.suno_description, visualDirection: project.visual_style, aspectRatio: project.aspect_ratio }, otherTitles);
+  const response = await generateText({ model: 'gpt-5.6-terra', prompt, operation: 'concept.regenerate', projectId: project.id, targetId: conceptId });
+  const concept = ConceptSchema.parse(JSON.parse(response.trim().replace(/^```json\s*/i, '').replace(/```$/, '').trim()));
   updateConcept(project.id, conceptId, concept);
   return getConcepts(project.id).find(item => item.id === conceptId)!;
 }

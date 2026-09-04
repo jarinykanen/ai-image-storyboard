@@ -34,6 +34,7 @@ Future scope may include image-to-video generation and editing assistance.
 * Preserve backward compatibility unless the task explicitly requires a breaking change.
 * Never expose API keys or secrets to the browser.
 * Before implementation, create a short "preservation checklist" of the existing functionality in the files/views being modified. Use it as regression acceptance criteria.
+* Keep project context and documentation up to date when changes are made. Update relevant documentation in the same change whenever behavior, workflows, architecture, setup, supported providers, limitations, or planned work changes.
 
 If requirements conflict with the current implementation, explain the conflict before making a destructive or architectural change.
 
