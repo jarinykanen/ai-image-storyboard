@@ -1,11 +1,13 @@
 import crypto from 'node:crypto';
+import { z } from 'zod';
 import { db } from './db.js';
-import { generateImage, type ImageProvider } from './providers.js';
+import { generateImage, generateText, type ImageProvider } from './providers.js';
 import { getSelectedConcept, requireSelectedConceptId } from './visual-concepts.js';
 import { buildSelectedConceptContext } from './visual-concept-prompts.js';
 import { buildSongContext } from './song-context.js';
 import { activateAsset, createGeneratedAsset, createUploadedAsset, listAssets } from './assets.js';
 import type { ImageQuality } from './provider-settings.js';
+import { buildVisualReferenceImagePrompt, buildVisualReferencePrompt } from './visual-reference-prompts.js';
 
 export type ReferenceType = 'character' | 'location';
 
@@ -14,6 +16,11 @@ export type VisualReference = {
   id: string; name: string; description: string; image_url: string | null; image_outdated: boolean; locked: boolean; imageAssets: ReturnType<typeof listAssets>;
 };
 export type VisualIdentity = { style: VisualStyle; characters: VisualReference[]; locations: VisualReference[] };
+
+const GeneratedReferenceSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  description: z.string().trim().min(1).max(2000),
+});
 
 const referenceSignature = (name: string, description: string) => JSON.stringify({ name: name.trim(), description: description.trim() });
 const styleSignature = (description: string) => JSON.stringify({ description: description.trim() });
@@ -58,6 +65,25 @@ export function createReference(projectId: string, type: ReferenceType, name: st
   return id;
 }
 
+export async function generateReferenceDetails(project: any, type: ReferenceType, idea: string, detailLevel = 50, includeProjectContext = true) {
+  const concept = getSelectedConcept(project.id);
+  if (!concept) throw new Error('Select a visual concept before creating a visual reference.');
+  const identity = getVisualIdentity(project.id, concept.id);
+  const planRow = includeProjectContext ? db.prepare('SELECT summary,narrative_arc,motifs FROM storyboard_plans WHERE project_id=? AND concept_id=?').get(project.id, concept.id) as any : null;
+  const prompt = buildVisualReferencePrompt({
+    type,
+    idea,
+    detailLevel,
+    project: includeProjectContext ? project : undefined,
+    identity: includeProjectContext ? identity : undefined,
+    concept: includeProjectContext ? concept : undefined,
+    storyboard: planRow ? { summary: planRow.summary, narrativeArc: planRow.narrative_arc, motifs: JSON.parse(planRow.motifs || '[]') } : null,
+  });
+  const response = await generateText({ model: 'gpt-5.6-terra', prompt, operation: `visual-reference.${type}.generate`, projectId: project.id, targetId: concept.id });
+  const json = response.trim().replace(/^```json\s*/i, '').replace(/```$/, '').trim();
+  return GeneratedReferenceSchema.parse(JSON.parse(json));
+}
+
 export function updateReference(projectId: string, referenceId: string, name: string, description: string) {
   const conceptId=requireSelectedConceptId(projectId);
   const result = db.prepare('UPDATE visual_references SET name=?,description=? WHERE id=? AND project_id=? AND concept_id=? AND locked=0').run(name,description,referenceId,projectId,conceptId);
@@ -94,11 +120,12 @@ export async function generateVisualReference(project: { id: string; image_provi
     const reference = (target === 'character' ? identity.characters : identity.locations).find(item => item.id === referenceId);
     if (!reference) throw new Error('Visual reference not found.');
     if (reference.locked) throw new Error('Unlock this reference before regenerating it.');
-    prompt = target === 'character'
-      ? `Create a consistent character reference image for ${reference.name}. ${reference.description}. Visual style: ${identity.style.description || 'cinematic music video'}.${conceptContext} ${songContext} Do not include text, captions, logos, or watermarks.`
-      : `Create a consistent location reference image for ${reference.name}. ${reference.description}. Visual style: ${identity.style.description || 'cinematic music video'}.${conceptContext} ${songContext} Do not include text, captions, logos, or watermarks.`;
+    prompt = buildVisualReferenceImagePrompt({ type: target, name: reference.name, description: reference.description, visualStyle: identity.style.description });
   }
-  const style = { id: 'visual-style', type: 'style' as const, name: 'Visual Style', description: identity.style.description, imageAsset: identity.style.image_url, locked: identity.style.locked, stale: identity.style.image_outdated };
+  // A style image can carry strong subject and scene content into an image-edit
+  // request. New character/location references therefore use the style's text
+  // description only, keeping their own saved specification authoritative.
+  const style = { id: 'visual-style', type: 'style' as const, name: 'Visual Style', description: identity.style.description, imageAsset: target === 'style' ? identity.style.image_url : null, locked: identity.style.locked, stale: identity.style.image_outdated };
   const result = await generateImage(project.image_provider, { projectId: project.id, shotId: `reference:${referenceId || 'style'}`, aspectRatio: project.aspect_ratio, visualStyle: identity.style.description, concept: null, description: prompt, action: '', shotType: 'reference image', camera: '', mood: '', characters: [], location: null, previousShot: null, referenceContext: { style, characters: [], location: null, continuityReference: null }, generationInstructions: '', prompt, qualityPreset: qualityPreset ?? (project as any).image_quality_preset, modelOverride: (project as any).image_model_override, resolutionOverride: (project as any).image_resolution_override });
   const ownerType = target === 'style' ? 'style' as const : 'reference' as const;
   const ownerId = target === 'style' ? conceptId : referenceId!;

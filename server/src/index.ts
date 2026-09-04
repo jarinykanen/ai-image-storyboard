@@ -10,7 +10,7 @@ import { createStoryboard, regenerateStoryboardShot, shotCountForDensity } from 
 import { reviewStoryboard } from './storyboard-review.js';
 import { type StoryboardPlan, type StoryboardShotContent } from './storyboard-prompts.js';
 import { activateGeneration, addUploadedShotImage, approvedShotsNeedingFinal, deleteGeneration, generateSingle, generationEstimate, refineSingle, getBatch, listGenerations, shotsMissingImages, startBatch } from './image-generation.js';
-import { acknowledgeVisualReferenceImage, activateVisualReferenceAsset, clearVisualReferenceImage, createReference, deleteReference, ensureVisualIdentity, generateVisualReference, getVisualIdentity, setVisualLock, updateReference, updateVisualStyle, uploadVisualReference } from './visual-identity.js';
+import { acknowledgeVisualReferenceImage, activateVisualReferenceAsset, clearVisualReferenceImage, createReference, deleteReference, ensureVisualIdentity, generateReferenceDetails, generateVisualReference, getVisualIdentity, setVisualLock, updateReference, updateVisualStyle, uploadVisualReference } from './visual-identity.js';
 import { ConceptInputSchema, createConcept, deleteConcept, generateConceptImage, generateConcepts, getConcepts, getSelectedConcept, parseExternalConceptResponse, regenerateConcept, requireSelectedConceptId, selectConcept, updateConcept, uploadConceptImage } from './visual-concepts.js';
 import { buildExternalConceptPrompt } from './visual-concept-prompts.js';
 import { findAsset, MAX_IMAGE_UPLOAD_BYTES } from './assets.js';
@@ -131,11 +131,12 @@ app.post('/api/projects/:id/canva-export', async (req, res, next) => {
 });
 
 const ImageSettingsInput = z.object({ imageProvider: z.enum(['openai', 'grok']), qualityPreset: z.enum(['draft', 'standard', 'best']), modelOverride: z.string().nullable().optional(), resolutionOverride: z.enum(['1024x1024', '1024x1536', '1536x1024', '1k', '2k']).nullable().optional() });
-const ProjectMetadataInput = z.object({ sunoDescription: z.string().max(20000).optional().default('') });
+const ProjectMetadataInput = z.object({ lyrics: z.string().max(20000).optional(), sunoDescription: z.string().max(20000).optional() });
 app.put('/api/projects/:id', (req, res) => {
   const project = requireProject(req.params.id, res); if (!project) return;
   const input = ProjectMetadataInput.parse(req.body);
-  db.prepare('UPDATE projects SET suno_description=? WHERE id=?').run(input.sunoDescription.trim() || null, project.id);
+  if (input.lyrics !== undefined) db.prepare('UPDATE projects SET lyrics=? WHERE id=?').run(input.lyrics, project.id);
+  if (input.sunoDescription !== undefined) db.prepare('UPDATE projects SET suno_description=? WHERE id=?').run(input.sunoDescription.trim() || null, project.id);
   res.json(requireProject(project.id, res));
 });
 const StoryboardSettingsInput = z.object({ approach: z.enum(['narrative', 'performance', 'abstract', 'mixed']) });
@@ -178,6 +179,7 @@ function getLatestStoryboardReview(projectId: string) {
 }
 
 const ReferenceInput = z.object({ name: z.string().min(1).max(120), description: z.string().min(1).max(2000) });
+const ReferenceGenerationInput = z.object({ prompt: z.string().trim().min(1).max(2000), detailLevel: z.number().int().min(0).max(100).default(50), includeProjectContext: z.boolean().default(true) });
 const StyleInput = z.object({ description: z.string().min(1).max(2000) });
 const ExternalConceptResponseInput = z.object({ response: z.string().trim().min(1).max(50000) });
 const referenceType = z.enum(['character', 'location']);
@@ -263,6 +265,14 @@ app.post('/api/projects/:id/concepts/:conceptId/upload', upload.single('image'),
 app.get('/api/projects/:id/visual-identity', (req, res) => {
   if (!requireProject(req.params.id, res)) return;
   res.json(getVisualIdentity(req.params.id));
+});
+app.post('/api/projects/:id/visual-identity/:type/generate-details', async (req, res, next) => {
+  try {
+    const project = requireProject(req.params.id, res); if (!project) return;
+    const type = referenceType.parse(req.params.type);
+    const input = ReferenceGenerationInput.parse(req.body ?? {});
+    res.json(await generateReferenceDetails(project, type, input.prompt, input.detailLevel, input.includeProjectContext));
+  } catch (error) { next(error); }
 });
 app.put('/api/projects/:id/visual-identity/style', (req, res) => {
   if (!requireProject(req.params.id, res)) return;
@@ -502,7 +512,9 @@ app.put('/api/projects/:id/storyboard-review/issues/:issueId', (req, res) => {
   res.json(getLatestStoryboardReview(req.params.id));
 });
 
-const ShotEditInput = z.object({ title: z.string().trim().min(1).max(200).optional(), section: z.string().trim().min(1).max(200).optional(), description: z.string().min(1).max(4000), action: z.string().min(1).max(2000), shotType: z.string().min(1).max(200), camera: z.string().min(1).max(500), mood: z.string().min(1).max(500), characterIds: z.array(z.string()).max(20), locationId: z.string().nullable() });
+// Generated storyboard descriptions can be long-form creative direction. Keep
+// edits compatible with the same 20k ceiling used for other project text.
+const ShotEditInput = z.object({ title: z.string().trim().min(1).max(200).optional(), section: z.string().trim().min(1).max(200).optional(), description: z.string().min(1).max(20000), action: z.string().min(1).max(2000), shotType: z.string().min(1).max(200), camera: z.string().min(1).max(500), mood: z.string().min(1).max(500), characterIds: z.array(z.string()).max(20), locationId: z.string().nullable() });
 app.put('/api/projects/:id/shots/:shotId', (req, res) => {
   const project = requireProject(req.params.id, res); if (!project) return;
   const input = ShotEditInput.parse(req.body);

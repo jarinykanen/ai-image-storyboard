@@ -32,7 +32,9 @@ The application currently supports still-image production. Song upload, audio an
 
 - Shared visual-style, character, and location references
 - Editable structured descriptions used by storyboard and image generation
+- AI-assisted character and location descriptions with configurable detail and optional project-context grounding; manual direction takes priority, and generated text remains editable and is not saved automatically
 - Generated or uploaded JPEG, PNG, and WebP reference images
+- Character and location image generation treats the saved reference description as authoritative; visual-style text supplies compatible aesthetics without importing scene content from a style image
 - Reference-image version history, activation, download, and non-destructive clearing
 - Locking for visual style, characters, and locations
 - Outdated-image indicators when the associated description changes
@@ -142,6 +144,7 @@ There is currently no automated test or lint script.
 - `server/src/storyboard.ts`: storyboard planning and generation
 - `server/src/image-generation.ts`: image requests, versions, batch orchestration, and generation status
 - `server/src/visual-identity.ts`: project references and reference images
+- `server/src/visual-reference-prompts.ts`: AI-assisted character and location text prompts
 - `server/src/storyboard-review.ts`: consistency review
 - `server/src/artwork.ts`: publishing artwork generation and refinement
 - `server/src/canva-export.ts`: Canva-oriented ZIP export
