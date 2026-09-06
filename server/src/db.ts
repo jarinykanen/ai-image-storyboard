@@ -13,6 +13,8 @@ db.exec(`
 CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
+  project_type TEXT NOT NULL DEFAULT 'music_video',
+  creative_brief TEXT NOT NULL DEFAULT '',
   lyrics TEXT NOT NULL,
   visual_style TEXT NOT NULL,
   aspect_ratio TEXT NOT NULL,
@@ -218,6 +220,10 @@ addProjectColumn('storyboard_approach', "TEXT NOT NULL DEFAULT 'mixed'");
 addProjectColumn('publishing_targets', "TEXT NOT NULL DEFAULT '[]'");
 addProjectColumn('primary_visual_format', "TEXT NOT NULL DEFAULT 'landscape'");
 addProjectColumn('selected_concept_id', 'TEXT');
+// Existing projects were created by the music-video-only version. New projects
+// explicitly store their type, while this default preserves legacy semantics.
+addProjectColumn('project_type', "TEXT NOT NULL DEFAULT 'music_video'");
+addProjectColumn('creative_brief', "TEXT NOT NULL DEFAULT ''");
 // Every legacy project needs a concept to own its existing creative workspace.
 // Prefer the user's selected concept; create a clearly labelled direction only
 // when an older project never selected one.
@@ -274,8 +280,12 @@ db.prepare("UPDATE image_assets SET tier=CASE quality WHEN 'draft' THEN 'DRAFT' 
 // Reference images are intentionally retained after copy edits. These snapshots
 // let the UI indicate when the retained image no longer represents the text.
 const visualIdentityColumns = new Set((db.prepare('PRAGMA table_info(visual_identities)').all() as { name: string }[]).map(column => column.name));
+// Locking was introduced after the first visual-identity schema. Keep existing
+// projects usable by adding the flag before any lock-related query runs.
+if (!visualIdentityColumns.has('style_locked')) db.exec('ALTER TABLE visual_identities ADD COLUMN style_locked INTEGER NOT NULL DEFAULT 0');
 if (!visualIdentityColumns.has('style_image_signature')) db.exec('ALTER TABLE visual_identities ADD COLUMN style_image_signature TEXT');
 const visualReferenceColumns = new Set((db.prepare('PRAGMA table_info(visual_references)').all() as { name: string }[]).map(column => column.name));
+if (!visualReferenceColumns.has('locked')) db.exec('ALTER TABLE visual_references ADD COLUMN locked INTEGER NOT NULL DEFAULT 0');
 if (!visualReferenceColumns.has('image_signature')) db.exec('ALTER TABLE visual_references ADD COLUMN image_signature TEXT');
 if (!visualReferenceColumns.has('image_provider')) db.exec('ALTER TABLE visual_references ADD COLUMN image_provider TEXT');
 if (!visualReferenceColumns.has('image_model')) db.exec('ALTER TABLE visual_references ADD COLUMN image_model TEXT');

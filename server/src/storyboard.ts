@@ -9,7 +9,7 @@ export const StoryboardShotSchema = z.object({ startTime: nullableNumber, endTim
 export const StoryboardPlanSchema = z.object({ approach: z.enum(['narrative', 'performance', 'abstract', 'mixed']), summary: z.string().min(1), narrativeArc: z.string().min(1), opening: z.string().min(1), midpoint: z.string().min(1), climax: z.string().min(1), ending: z.string().min(1), motifs: z.array(z.string().min(1)).max(3), primaryCharacterIds: z.array(z.string()), primaryLocationIds: z.array(z.string()), pacingNotes: z.string().min(1) });
 const StoryboardSchema = z.object({ plan: StoryboardPlanSchema, shots: z.array(StoryboardShotSchema).min(1).max(60) });
 export type GeneratedStoryboardShot = z.infer<typeof StoryboardShotSchema>;
-type Project = { id: string; title: string; lyrics: string; suno_description?: string | null; visual_style: string; aspect_ratio: string; duration_seconds?: number | null };
+type Project = { id: string; title: string; project_type?: 'general'|'music_video'; creative_brief?: string | null; lyrics: string; suno_description?: string | null; visual_style: string; aspect_ratio: string; duration_seconds?: number | null };
 
 function parse(text: string) { return JSON.parse(text.trim().replace(/^```json\s*/i, '').replace(/```$/, '').trim()); }
 function validateReferences(shot: GeneratedStoryboardShot, identity: VisualIdentity) {
@@ -34,5 +34,7 @@ export async function regenerateStoryboardShot(input: { project: Project; detail
   const prompt = buildShotRegenerationPrompt({ project: input.project, identity: input.visualIdentity, concept: input.selectedConcept, detailLevel: input.detailLevel ?? 50, plan: input.plan, previous: input.previous, current: input.current, next: input.next });
   const response = await generateText({ model: 'gpt-5.6-terra', prompt, operation: 'storyboard-shot.regenerate', projectId: input.project.id });
   const content = StoryboardShotSchema.omit({ startTime: true, endTime: true }).parse(parse(response));
-  return validateReferences({ ...content, startTime: null, endTime: null }, input.visualIdentity);
+  // References are a user-controlled part of the shot. Regeneration can improve
+  // creative direction, but it must never replace saved character/location choices.
+  return validateReferences({ ...content, characterIds: input.current.characterIds, locationId: input.current.locationId, startTime: null, endTime: null }, input.visualIdentity);
 }

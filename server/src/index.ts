@@ -10,14 +10,17 @@ import { createStoryboard, regenerateStoryboardShot, shotCountForDensity } from 
 import { reviewStoryboard } from './storyboard-review.js';
 import { type StoryboardPlan, type StoryboardShotContent } from './storyboard-prompts.js';
 import { activateGeneration, addUploadedShotImage, approvedShotsNeedingFinal, deleteGeneration, generateSingle, generationEstimate, refineSingle, getBatch, listGenerations, shotsMissingImages, startBatch } from './image-generation.js';
-import { acknowledgeVisualReferenceImage, activateVisualReferenceAsset, clearVisualReferenceImage, createReference, deleteReference, ensureVisualIdentity, generateReferenceDetails, generateVisualReference, getVisualIdentity, setVisualLock, updateReference, updateVisualStyle, uploadVisualReference } from './visual-identity.js';
-import { ConceptInputSchema, createConcept, deleteConcept, generateConceptImage, generateConcepts, getConcepts, getSelectedConcept, parseExternalConceptResponse, regenerateConcept, requireSelectedConceptId, selectConcept, updateConcept, uploadConceptImage } from './visual-concepts.js';
-import { buildExternalConceptPrompt } from './visual-concept-prompts.js';
+import { acknowledgeVisualReferenceImage, activateVisualReferenceAsset, clearVisualReferenceImage, createReference, deleteReference, ensureVisualIdentity, generateReferenceDetails, generateVisualReference, getVisualIdentity, MAX_VISUAL_REFERENCE_DESCRIPTION_LENGTH, setVisualLock, updateReference, updateVisualStyle, uploadVisualReference } from './visual-identity.js';
+import { ConceptInputSchema, createConcept, deleteConcept, generateConceptImage, generateConcepts, getConcept, getConcepts, getSelectedConcept, regenerateConcept, requireSelectedConceptId, selectConcept, updateConcept, uploadConceptImage } from './visual-concepts.js';
+import { buildExternalConceptPrompt, buildExternalConceptUpdatePrompt } from './visual-concept-prompts.js';
+import { analyzeExternalConceptSource, ConceptImportAnalysisError, ExternalConceptSourceInput } from './concept-import.js';
+import { analyzeExternalStoryboardSource, buildExternalStoryboardImportPrompt, ExternalStoryboardSourceInput, StoryboardImportAnalysisError } from './storyboard-import.js';
 import { findAsset, MAX_IMAGE_UPLOAD_BYTES } from './assets.js';
 import { buildCanvaExport, canvaExportSummary } from './canva-export.js';
 import { allPlatformPresets, platformPresets, type PlatformId } from './platform-presets.js';
 import { deleteArtworkAsset, generateArtwork, listArtwork, refineArtwork, updateArtwork, uploadArtwork, useSourceAsArtwork } from './artwork.js';
 import { type Provider, type ImageQuality, type ImageResolution, type ImageTier, ProviderCapabilityError, ProviderCredentialError, ProviderNotConfiguredError, findImageModel, getProviderRegistry, getProviderSettings, normalizeProviderError, providerErrorMessage, removeProviderKey, resolveImageConfiguration, resolveProvider, saveProviderKey, testProvider } from './provider-settings.js';
+import { analyzeProjectSource } from './project-import.js';
 
 const app = express();
 app.use(cors());
@@ -29,17 +32,26 @@ app.get('/api/assets/:assetId/download', (req, res) => { const asset=findAsset(r
 
 const ProjectInput = z.object({
   title: z.string().min(1).max(120),
+  projectType: z.enum(['general', 'music_video']).default('general'),
+  creativeBrief: z.string().max(20000).optional().default(''),
   lyrics: z.string().max(20000).default(''),
   sunoDescription: z.string().max(20000).optional().default(''),
-  visualStyle: z.string().min(1).max(500),
-  aspectRatio: z.enum(['16:9', '9:16', '1:1']),
-  imageProvider: z.enum(['openai', 'grok']),
+  visualStyle: z.string().max(2000).optional().default(''),
+  aspectRatio: z.enum(['16:9', '9:16', '1:1']).default('16:9'),
+  imageProvider: z.enum(['openai', 'grok']).default('openai'),
   imageQualityPreset: z.enum(['draft', 'standard', 'best']).default('draft'),
 });
 const ImageQualityOverrideInput = z.object({ qualityPreset: z.enum(['draft', 'standard', 'best']).optional() });
 const ImageTierOverrideInput = ImageQualityOverrideInput.extend({ tier: z.enum(['DRAFT', 'STANDARD', 'FINAL']).optional() });
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
+
+app.post('/api/project-import/analyze', async (req, res, next) => {
+  try {
+    const { source } = z.object({ source: z.string().trim().min(1).max(50000) }).parse(req.body);
+    res.json({ draft: await analyzeProjectSource(source) });
+  } catch (error) { next(error); }
+});
 
 const providerParam = z.enum(['openai', 'grok']);
 const ProviderKeyInput = z.object({ apiKey: z.string().trim().min(1).max(500) });
@@ -91,11 +103,10 @@ app.delete('/api/projects/:id', (req, res) => {
 
 app.post('/api/projects', (req, res) => {
   const input = ProjectInput.parse(req.body);
-  const imageProvider = resolveProvider('imageGeneration', { requested: input.imageProvider, strict: true });
   const id = crypto.randomUUID();
   const createdAt = new Date().toISOString();
-  db.prepare(`INSERT INTO projects (id,title,lyrics,suno_description,visual_style,aspect_ratio,image_provider,image_quality_preset,created_at)
-    VALUES (?,?,?,?,?,?,?,?,?)`).run(id, input.title, input.lyrics, input.sunoDescription.trim() || null, input.visualStyle, input.aspectRatio, imageProvider, input.imageQualityPreset, createdAt);
+  db.prepare(`INSERT INTO projects (id,title,project_type,creative_brief,lyrics,suno_description,visual_style,aspect_ratio,image_provider,image_quality_preset,created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(id, input.title, input.projectType, input.creativeBrief.trim(), input.lyrics, input.sunoDescription.trim() || null, input.visualStyle.trim(), input.aspectRatio, input.imageProvider, input.imageQualityPreset, createdAt);
   res.status(201).json({ id });
 });
 
@@ -131,10 +142,19 @@ app.post('/api/projects/:id/canva-export', async (req, res, next) => {
 });
 
 const ImageSettingsInput = z.object({ imageProvider: z.enum(['openai', 'grok']), qualityPreset: z.enum(['draft', 'standard', 'best']), modelOverride: z.string().nullable().optional(), resolutionOverride: z.enum(['1024x1024', '1024x1536', '1536x1024', '1k', '2k']).nullable().optional() });
-const ProjectMetadataInput = z.object({ lyrics: z.string().max(20000).optional(), sunoDescription: z.string().max(20000).optional() });
+const ProjectMetadataInput = z.object({
+  projectType: z.enum(['general', 'music_video']).optional(),
+  creativeBrief: z.string().max(20000).optional(),
+  visualStyle: z.string().max(2000).optional(),
+  lyrics: z.string().max(20000).optional(),
+  sunoDescription: z.string().max(20000).optional(),
+});
 app.put('/api/projects/:id', (req, res) => {
   const project = requireProject(req.params.id, res); if (!project) return;
   const input = ProjectMetadataInput.parse(req.body);
+  if (input.projectType !== undefined) db.prepare('UPDATE projects SET project_type=? WHERE id=?').run(input.projectType, project.id);
+  if (input.creativeBrief !== undefined) db.prepare('UPDATE projects SET creative_brief=? WHERE id=?').run(input.creativeBrief.trim(), project.id);
+  if (input.visualStyle !== undefined) db.prepare('UPDATE projects SET visual_style=? WHERE id=?').run(input.visualStyle.trim(), project.id);
   if (input.lyrics !== undefined) db.prepare('UPDATE projects SET lyrics=? WHERE id=?').run(input.lyrics, project.id);
   if (input.sunoDescription !== undefined) db.prepare('UPDATE projects SET suno_description=? WHERE id=?').run(input.sunoDescription.trim() || null, project.id);
   res.json(requireProject(project.id, res));
@@ -166,7 +186,7 @@ function getStoryboardPlan(projectId: string, conceptId=getSelectedConcept(proje
 function saveStoryboardPlan(projectId: string, conceptId:string, plan: StoryboardPlan) { db.prepare(`INSERT INTO storyboard_plans (concept_id,project_id,approach,summary,narrative_arc,opening,midpoint,climax,ending,motifs,primary_character_ids,primary_location_ids,pacing_notes,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(concept_id) DO UPDATE SET approach=excluded.approach,summary=excluded.summary,narrative_arc=excluded.narrative_arc,opening=excluded.opening,midpoint=excluded.midpoint,climax=excluded.climax,ending=excluded.ending,motifs=excluded.motifs,primary_character_ids=excluded.primary_character_ids,primary_location_ids=excluded.primary_location_ids,pacing_notes=excluded.pacing_notes,created_at=excluded.created_at`).run(conceptId,projectId,plan.approach,plan.summary,plan.narrativeArc,plan.opening,plan.midpoint,plan.climax,plan.ending,JSON.stringify(plan.motifs),JSON.stringify(plan.primaryCharacterIds),JSON.stringify(plan.primaryLocationIds),plan.pacingNotes,new Date().toISOString()); }
 function reviewContextSignature(projectId: string) {
   const conceptId=requireSelectedConceptId(projectId);
-  const project = db.prepare('SELECT title,lyrics,suno_description,visual_style FROM projects WHERE id=?').get(projectId);
+  const project = db.prepare('SELECT title,project_type,creative_brief,lyrics,suno_description,visual_style FROM projects WHERE id=?').get(projectId);
   const shots = db.prepare('SELECT id,position,section,title,description,action,shot_type,camera,mood,character_ids,location_id,image_url FROM shots WHERE project_id=? AND concept_id=? ORDER BY position').all(projectId,conceptId);
   return JSON.stringify({ project, plan: getStoryboardPlan(projectId,conceptId), identity: getVisualIdentity(projectId,conceptId), concept: getSelectedConcept(projectId), shots });
 }
@@ -178,20 +198,14 @@ function getLatestStoryboardReview(projectId: string) {
   return { id: review.id, storyboardId: projectId, createdAt: review.created_at, summary: review.summary, score: review.score, stale: review.context_signature !== reviewContextSignature(projectId), issues };
 }
 
-const ReferenceInput = z.object({ name: z.string().min(1).max(120), description: z.string().min(1).max(2000) });
+const ReferenceInput = z.object({ name: z.string().trim().min(1).max(120), description: z.string().trim().min(1).max(MAX_VISUAL_REFERENCE_DESCRIPTION_LENGTH) });
 const ReferenceGenerationInput = z.object({ prompt: z.string().trim().min(1).max(2000), detailLevel: z.number().int().min(0).max(100).default(50), includeProjectContext: z.boolean().default(true) });
 const StyleInput = z.object({ description: z.string().min(1).max(2000) });
-const ExternalConceptResponseInput = z.object({ response: z.string().trim().min(1).max(50000) });
 const referenceType = z.enum(['character', 'location']);
 
 function requireProject(id: string, res: express.Response) {
   const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(id) as any;
   if (!project) { res.status(404).json({ error: 'Project not found' }); return null; }
-  const imageProvider = resolveProvider('imageGeneration', { requested: project.image_provider });
-  if (imageProvider !== project.image_provider) {
-    db.prepare('UPDATE projects SET image_provider=? WHERE id=?').run(imageProvider, id);
-    project.image_provider = imageProvider;
-  }
   return project;
 }
 
@@ -202,14 +216,36 @@ app.get('/api/projects/:id/concepts', (req, res) => {
 app.get('/api/projects/:id/concepts/external-prompt', (req, res) => {
   const project = requireProject(req.params.id, res); if (!project) return;
   const existingTitles = getConcepts(project.id).map(concept => concept.title);
-  res.json({ prompt: buildExternalConceptPrompt({ title: project.title, lyrics: project.lyrics, sunoDescription: project.suno_description, visualDirection: project.visual_style, aspectRatio: project.aspect_ratio }, existingTitles) });
+  res.json({ prompt: buildExternalConceptPrompt({ title: project.title, projectType: project.project_type, creativeBrief: project.creative_brief, lyrics: project.lyrics, sunoDescription: project.suno_description, visualDirection: project.visual_style, aspectRatio: project.aspect_ratio }, existingTitles) });
 });
-app.post('/api/projects/:id/concepts/import', (req, res) => {
+app.get('/api/projects/:id/concepts/:conceptId/external-update-prompt', (req, res) => {
   const project = requireProject(req.params.id, res); if (!project) return;
-  const { response } = ExternalConceptResponseInput.parse(req.body);
-  const result = parseExternalConceptResponse(response);
-  if ('error' in result) return res.status(400).json({ error: result.error });
-  res.status(201).json({ concept: createConcept(project.id, result.concept) });
+  const concept = getConcept(project.id, req.params.conceptId);
+  if (!concept) return res.status(404).json({ error: 'Visual concept not found.' });
+  res.json({ prompt: buildExternalConceptUpdatePrompt({ title: project.title, projectType: project.project_type, creativeBrief: project.creative_brief, lyrics: project.lyrics, sunoDescription: project.suno_description, visualDirection: project.visual_style, aspectRatio: project.aspect_ratio }, concept) });
+});
+app.post('/api/projects/:id/concepts/import', async (req, res, next) => {
+  try {
+    const project = requireProject(req.params.id, res); if (!project) return;
+    const { response } = ExternalConceptSourceInput.parse(req.body);
+    const concept = await analyzeExternalConceptSource(project, response);
+    res.status(201).json({ concept: createConcept(project.id, concept) });
+  } catch (error) {
+    if (error instanceof ConceptImportAnalysisError) return res.status(422).json({ error: error.message, code: 'CONCEPT_IMPORT_ANALYSIS_FAILED' });
+    next(error);
+  }
+});
+app.post('/api/projects/:id/concepts/:conceptId/import', async (req, res, next) => {
+  try {
+    const project = requireProject(req.params.id, res); if (!project) return;
+    if (!getConcept(project.id, req.params.conceptId)) return res.status(404).json({ error: 'Visual concept not found.' });
+    const { response } = ExternalConceptSourceInput.parse(req.body);
+    const concept = updateConcept(project.id, req.params.conceptId, await analyzeExternalConceptSource(project, response));
+    res.json({ concept });
+  } catch (error) {
+    if (error instanceof ConceptImportAnalysisError) return res.status(422).json({ error: error.message, code: 'CONCEPT_IMPORT_ANALYSIS_FAILED' });
+    next(error);
+  }
 });
 app.post('/api/projects/:id/concepts/generate', async (req, res, next) => {
   try {
@@ -278,6 +314,13 @@ app.put('/api/projects/:id/visual-identity/style', (req, res) => {
   if (!requireProject(req.params.id, res)) return;
   updateVisualStyle(req.params.id, StyleInput.parse(req.body).description);
   res.json(getVisualIdentity(req.params.id).style);
+});
+// This must precede the generic `:type/:referenceId` route below: otherwise
+// Express treats `style/lock` as an attempt to edit a reference named "lock".
+app.put('/api/projects/:id/visual-identity/style/lock', (req, res) => {
+  if (!requireProject(req.params.id, res)) return;
+  setVisualLock(req.params.id, 'style', z.object({ locked: z.boolean() }).parse(req.body).locked);
+  res.json({ ok: true });
 });
 app.post('/api/projects/:id/visual-identity/:type', (req, res) => {
   if (!requireProject(req.params.id, res)) return;
@@ -370,12 +413,6 @@ app.put('/api/projects/:id/visual-identity/:type/:referenceId/lock', (req, res) 
   if (!setVisualLock(req.params.id, type, locked, req.params.referenceId)) return res.status(404).json({ error: 'Visual reference not found' });
   res.json({ ok: true });
 });
-app.put('/api/projects/:id/visual-identity/style/lock', (req, res) => {
-  if (!requireProject(req.params.id, res)) return;
-  setVisualLock(req.params.id, 'style', z.object({ locked: z.boolean() }).parse(req.body).locked);
-  res.json({ ok: true });
-});
-
 app.post('/api/projects/:id/storyboard', async (req, res, next) => {
   try {
     const input = z.object({
@@ -406,6 +443,35 @@ app.post('/api/projects/:id/storyboard', async (req, res, next) => {
     transaction();
     res.json({ count: storyboard.shots.length });
   } catch (error) { next(error); }
+});
+
+app.get('/api/projects/:id/storyboard/external-prompt', (req, res) => {
+  const project = requireProject(req.params.id, res); if (!project) return;
+  requireSelectedConceptId(req.params.id);
+  res.json({ prompt: buildExternalStoryboardImportPrompt({ project, identity: getVisualIdentity(req.params.id), concept: getSelectedConcept(req.params.id) }) });
+});
+
+app.post('/api/projects/:id/storyboard/import', async (req, res, next) => {
+  try {
+    const project = requireProject(req.params.id, res); if (!project) return;
+    const input = ExternalStoryboardSourceInput.parse(req.body);
+    const conceptId = requireSelectedConceptId(req.params.id);
+    const existing = db.prepare('SELECT COUNT(*) AS count FROM shots WHERE project_id=? AND concept_id=?').get(req.params.id, conceptId) as { count: number };
+    if (existing.count && !input.replaceExisting) return res.status(409).json({ error: `Importing will replace the current ${existing.count}-shot storyboard. Confirm replacement to continue.`, code: 'STORYBOARD_REPLACEMENT_REQUIRED', existingCount: existing.count });
+    const storyboard = await analyzeExternalStoryboardSource({ project, identity: getVisualIdentity(req.params.id), concept: getSelectedConcept(req.params.id), source: input.response });
+    db.transaction(() => {
+      db.prepare('DELETE FROM shots WHERE project_id=? AND concept_id=?').run(req.params.id, conceptId);
+      saveStoryboardPlan(req.params.id, conceptId, storyboard.plan);
+      const insert = db.prepare(`INSERT INTO shots
+        (id,project_id,concept_id,position,start_seconds,end_seconds,section,title,description,action,shot_type,camera,mood,character_ids,location_id,prompt,status,generation_status,approval_status)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending','pending','unapproved')`);
+      storyboard.shots.forEach((shot, index) => insert.run(crypto.randomUUID(), req.params.id, conceptId, index + 1, shot.startTime, shot.endTime, shot.section, shot.title, shot.description, shot.action, shot.shotType, shot.camera, shot.mood, JSON.stringify(shot.characterIds), shot.locationId, ''));
+    })();
+    res.status(201).json({ count: storyboard.shots.length });
+  } catch (error) {
+    if (error instanceof StoryboardImportAnalysisError) return res.status(422).json({ error: error.message, code: 'STORYBOARD_IMPORT_ANALYSIS_FAILED' });
+    next(error);
+  }
 });
 
 const ShotInsertInput = z.object({

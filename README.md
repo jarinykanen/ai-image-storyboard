@@ -1,37 +1,41 @@
-# AI Music Video Studio
+# AI Concept Studio
 
-AI Music Video Studio is a local-first application for developing visual concepts, consistent storyboard imagery, and publishing artwork for a music video. It is designed for non-technical users: normal workflows expose creative choices and clear generation actions rather than prompts, seeds, or provider payloads.
+AI Concept Studio is a local-first application for developing visual concepts, consistent storyboard imagery, and publishing artwork from a general creative brief. Music-video projects remain fully supported, including optional lyrics and SUNO context. It is designed for non-technical users: normal workflows expose creative choices and clear generation actions rather than prompts, seeds, or provider payloads.
 
 The application currently supports still-image production. Song upload, audio analysis, animatic playback, and image-to-video generation are not implemented yet.
 
 ## Current workflow
 
-1. Create a project with a title, lyrics, optional SUNO description, visual direction, format, and image-generation defaults.
-2. Generate text-only visual concepts, create one manually, or import a concept created with another AI.
-3. Select a concept. Each concept has an independent visual identity, storyboard, images, and artwork workspace.
-4. Define and lock the visual style, characters, and locations. Reference images can be generated or uploaded.
-5. Generate and edit a timed storyboard, then run a consistency review before spending image-generation credits.
-6. Generate images for one shot, selected shots, or all genuinely missing shots.
-7. Compare versions, refine or regenerate images, upload alternatives, and approve the chosen result.
-8. Render approved shots at the Final tier and export the project for Canva.
+1. Create a general concept or music-video project manually. Only a title is required; creative brief, visual direction, lyrics, SUNO context, format, and generation defaults can be added now or later.
+2. Optionally paste a response from another AI. Use it directly as the creative brief without an AI call, or explicitly ask the studio to analyze arbitrary prose, Markdown, lists, or JSON into an editable project draft.
+3. Generate text-only visual concepts, create one manually, or paste a complete response from another AI in any format. The configured text AI analyzes it into one editable concept without generating an image; an existing concept can use the same flow to update its direction.
+4. Select a concept. Each concept has an independent visual identity, storyboard, images, and artwork workspace.
+5. Define and lock the visual style, characters, and locations. Reference images can be generated or uploaded.
+6. Generate, manually build, or import a storyboard response from another AI in any format, then optionally run a consistency review before spending image-generation credits.
+7. Generate images for one shot, selected shots, or all genuinely missing shots.
+8. Compare versions, refine or regenerate images, upload alternatives, and approve the chosen result.
+9. Render approved shots at the Final tier and export the project for Canva.
 
 ## Implemented features
 
 ### Projects and creative direction
 
-- Local project creation and deletion, with editable song context, publishing targets, and generation settings
-- Lyrics and optional SUNO song context
+- Manual local project creation and deletion without requiring an AI provider
+- General creative briefs plus an optional specialized music-video workflow
+- Optional AI-assisted normalization of arbitrary content copied from another AI into an editable project draft
+- Editable project type, creative brief, visual direction, publishing targets, and generation settings
+- Preserved lyrics and optional SUNO song context for music-video projects
 - Landscape (16:9), vertical (9:16), and square (1:1) project formats
 - Publishing targets and a primary visual format
 - Narrative, performance, abstract, and mixed storyboard approaches
-- AI-generated, manually created, externally imported, editable, and removable visual concepts
+- AI-generated, manually created, externally imported (including prose, Markdown, lists, JSON, and mixed AI responses), editable, and removable visual concepts
 - Independent workspaces for each concept, with explicit concept selection
 - Generated and uploaded concept preview images, including multi-image variant generation
 
 ### Visual identity
 
 - Shared visual-style, character, and location references
-- Editable structured descriptions used by storyboard and image generation
+- Editable structured descriptions used by storyboard and image generation (character and location descriptions support up to 10,000 characters)
 - AI-assisted character and location descriptions with configurable detail and optional project-context grounding; manual direction takes priority, and generated text remains editable and is not saved automatically
 - Generated or uploaded JPEG, PNG, and WebP reference images
 - Character and location image generation treats the saved reference description as authoritative; visual-style text supplies compatible aesthetics without importing scene content from a style image
@@ -43,6 +47,7 @@ The application currently supports still-image production. Song upload, audio an
 ### Storyboard planning and review
 
 - AI-generated storyboards with configurable shot count and detail level
+- Externally imported storyboard shots: arbitrary prose, Markdown, lists, JSON, and mixed AI responses are analyzed into editable structured shots without generating images
 - Timed, ordered shots with section, description, action, shot type, camera, mood, character, and location fields
 - Manual shot insertion before or after existing shots
 - Shot editing, deletion, and AI regeneration of an individual shot plan
@@ -77,7 +82,7 @@ Every paid image-generation action requires explicit confirmation. Batch confirm
 ### Providers and storage
 
 - OpenAI and xAI / Grok image-provider adapters
-- OpenAI text generation for concepts, storyboards, and consistency reviews
+- OpenAI text generation for optional project-import analysis, concepts, storyboards, and consistency reviews
 - Provider capability checks so unsupported reference-image or editing operations are not assumed
 - Provider connection setup and testing in the Settings page
 - SQLite persistence for project and workflow data
@@ -115,7 +120,7 @@ Start the application:
 npm run dev
 ```
 
-Open the Vite URL shown in the terminal, normally <http://localhost:5173>. Configure and test provider credentials from the application's **Settings** page.
+Open the Vite URL shown in the terminal, normally <http://localhost:5173>. Provider credentials are optional for manual project creation and editing. Configure and test them from **Settings** when you want to use the corresponding AI actions.
 
 Environment variables can be used as local-development credential fallbacks:
 
@@ -139,6 +144,8 @@ There is currently no automated test or lint script.
 - `web/`: React, Vite, TypeScript, and Mantine user interface
 - `server/`: Express and TypeScript API
 - `server/src/providers.ts`: provider-specific text and image adapters behind normalized application interfaces
+- `server/src/project-context.ts`: shared general and music-video creative-context normalization
+- `server/src/project-import.ts`: optional extraction of arbitrary external-AI content into an editable project draft
 - `server/data/studio.sqlite`: local project database (created automatically)
 - `server/data/projects/`: generated and uploaded project images
 - `server/src/storyboard.ts`: storyboard planning and generation

@@ -10,7 +10,7 @@ const ResultSchema = z.object({ summary: z.string().min(1).max(1200), score: z.n
 const parse = (text: string) => JSON.parse(text.trim().replace(/^```json\s*/i, '').replace(/```$/, '').trim());
 export type ReviewShot = { id: string; order: number; section: string; title: string; description: string; action: string; shotType: string; camera: string; mood: string; characterIds: string[]; locationId: string | null; imageUrl?: string | null };
 
-export async function reviewStoryboard(input: { project: { id: string; title: string; visual_style: string; lyrics: string; suno_description?: string | null }; plan: StoryboardPlan | null; identity: VisualIdentity; concept?: VisualConcept | null; shots: ReviewShot[] }) {
+export async function reviewStoryboard(input: { project: { id: string; title: string; project_type?: 'general'|'music_video'; creative_brief?: string | null; aspect_ratio: string; visual_style: string; lyrics: string; suno_description?: string | null }; plan: StoryboardPlan | null; identity: VisualIdentity; concept?: VisualConcept | null; shots: ReviewShot[] }) {
   const prompt = buildStoryboardReviewPrompt(input);
   const response = await generateText({ model: 'gpt-5.6-terra', prompt, operation: 'storyboard.review', projectId: input.project.id, targetId: input.concept?.id });
   const result = ResultSchema.parse(parse(response));

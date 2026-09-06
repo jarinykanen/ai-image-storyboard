@@ -81,7 +81,7 @@ export function parseExternalConceptResponse(response: string): { concept: Conce
 }
 
 export async function generateConcepts(project: any) {
-  const prompt = buildConceptTextPrompt({ title: project.title, lyrics: project.lyrics, sunoDescription: project.suno_description, visualDirection: project.visual_style, aspectRatio: project.aspect_ratio });
+  const prompt = buildConceptTextPrompt({ title: project.title, projectType: project.project_type, creativeBrief: project.creative_brief, lyrics: project.lyrics, sunoDescription: project.suno_description, visualDirection: project.visual_style, aspectRatio: project.aspect_ratio });
   const response = await generateText({ model: 'gpt-5.6-terra', prompt, operation: 'concepts.generate', projectId: project.id });
   const text = response.trim().replace(/^```json\s*/i, '').replace(/```$/, '').trim();
   const { concepts } = ConceptsSchema.parse(JSON.parse(text));
@@ -157,7 +157,7 @@ export async function regenerateConcept(project: any, conceptId: string) {
   const current = db.prepare('SELECT id FROM visual_concepts WHERE id = ? AND project_id = ?').get(conceptId, project.id);
   if (!current) throw new Error('Visual concept not found.');
   const otherTitles = (db.prepare('SELECT title FROM visual_concepts WHERE project_id = ? AND id != ?').all(project.id, conceptId) as any[]).map(row => row.title);
-  const prompt = buildSingleConceptPrompt({ title: project.title, lyrics: project.lyrics, sunoDescription: project.suno_description, visualDirection: project.visual_style, aspectRatio: project.aspect_ratio }, otherTitles);
+  const prompt = buildSingleConceptPrompt({ title: project.title, projectType: project.project_type, creativeBrief: project.creative_brief, lyrics: project.lyrics, sunoDescription: project.suno_description, visualDirection: project.visual_style, aspectRatio: project.aspect_ratio }, otherTitles);
   const response = await generateText({ model: 'gpt-5.6-terra', prompt, operation: 'concept.regenerate', projectId: project.id, targetId: conceptId });
   const concept = ConceptSchema.parse(JSON.parse(response.trim().replace(/^```json\s*/i, '').replace(/```$/, '').trim()));
   updateConcept(project.id, conceptId, concept);
@@ -169,7 +169,7 @@ export async function generateConceptImage(project: { id: string; image_provider
   if (!row) throw new Error('Visual concept not found.');
   db.prepare("UPDATE visual_concepts SET image_status = 'generating' WHERE id = ?").run(conceptId);
   try {
-    const prompt = buildConceptImagePrompt(row);
+    const prompt = buildConceptImagePrompt(row, (project as any).project_type);
     const style = { id: 'concept-style', type: 'style' as const, name: 'Visual Style', description: row.visual_style, imageAsset: null, locked: false, stale: false };
     const result = await generateImage(project.image_provider, { projectId: project.id, shotId: `concept:${conceptId}`, aspectRatio: project.aspect_ratio, visualStyle: row.visual_style, concept: null, description: prompt, action: '', shotType: 'concept reference', camera: '', mood: row.mood, characters: [], location: null, previousShot: null, referenceContext: { style, characters: [], location: null, continuityReference: null }, generationInstructions: '', prompt, qualityPreset: qualityPreset ?? (project as any).image_quality_preset, modelOverride: (project as any).image_model_override, resolutionOverride: (project as any).image_resolution_override });
     const asset = await createGeneratedAsset({ projectId:project.id, ownerType:'concept', ownerId:conceptId, url:result.url, provider:result.provider, model:result.model, quality:result.quality, resolution:result.resolution, tier:result.tier });

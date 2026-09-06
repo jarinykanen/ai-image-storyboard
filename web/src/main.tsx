@@ -13,11 +13,11 @@ import { ArtworkPage } from './Artwork';
 import { studioTheme } from './theme';
 import { ConfirmModal } from './ConfirmModal';
 import { AppLayout, WorkspaceHeader } from './AppLayout';
-import { ProjectCreationModal } from './ProjectCreationModal';
+import { ProjectCreationModal, type ProjectDraft } from './ProjectCreationModal';
 
 const API = 'http://localhost:3001/api';
 
-type Project = { id:string; title:string; lyrics:string; suno_description?:string | null; visual_style:string; aspect_ratio:string; image_provider:'openai'|'grok'; image_quality_preset?:'draft'|'standard'|'best'; image_model_override?:string|null; image_resolution_override?:string|null; storyboard_approach?:'narrative'|'performance'|'abstract'|'mixed'; publishing_targets?:string; primary_visual_format?:string; selected_concept_id?:string|null; created_at:string };
+type Project = { id:string; title:string; project_type?:'general'|'music_video'; creative_brief?:string; lyrics:string; suno_description?:string | null; visual_style:string; aspect_ratio:string; image_provider:'openai'|'grok'; image_quality_preset?:'draft'|'standard'|'best'; image_model_override?:string|null; image_resolution_override?:string|null; storyboard_approach?:'narrative'|'performance'|'abstract'|'mixed'; publishing_targets?:string; primary_visual_format?:string; selected_concept_id?:string|null; created_at:string };
 type ActiveProject = { project: Project; shots: StoryboardShot[]; storyboardPlan?:{summary:string;motifs:string[]}|null; visualIdentity: VisualIdentityData; concepts: VisualConcept[]; storyboardReview: StoryboardReview|null; artwork:any[] };
 type ProviderSettings = { configured:boolean; status:string; capabilities: { textGeneration:boolean; imageGeneration:boolean; imageEditing:boolean; referenceImages:boolean } };
 type ProviderRegistry = { providers: Record<'openai'|'grok', ProviderSettings>; defaultTextProvider: 'openai'|'grok'|null; defaultImageProvider: 'openai'|'grok'|null };
@@ -90,6 +90,12 @@ function App() {
     }
   }
 
+  async function analyzeProjectSource(source:string):Promise<ProjectDraft>{
+    const response=await fetch(`${API}/project-import/analyze`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source})});
+    if(!response.ok) throw new Error((await response.json().catch(()=>({}))).error||'Could not analyze that content.');
+    return (await response.json()).draft;
+  }
+
   async function openProject(id:string, updateUrl = true) {
     const response = await fetch(`${API}/projects/${id}`);
     if (!response.ok) {
@@ -126,11 +132,11 @@ function App() {
     void fetch(`${API}/settings/providers`).then(response => response.json()).then(setProviders);
   };
 
-  if (showSettings) return <AppLayout headerStart={<Button variant="subtle" className="nav-back" onClick={closeSettings}>← <span>Projects</span></Button>} headerEnd={<Text className="app-brand">AI Music Video Studio</Text>}><SettingsPage onSaved={closeSettings} /></AppLayout>;
+  if (showSettings) return <AppLayout headerStart={<Button variant="subtle" className="nav-back" onClick={closeSettings}>← <span>Projects</span></Button>} headerEnd={<Text className="app-brand">AI Concept Studio</Text>}><SettingsPage onSaved={closeSettings} /></AppLayout>;
   if (active) {
     const refreshActive = () => openProject(active.project.id);
     const selectedConcept = active.concepts.find(concept => concept.id === active.project.selected_concept_id) ?? active.concepts.find(concept => concept.status === 'selected');
-    const sidebar = view === 'concepts' ? <section className="context-info"><h2>Creative direction</h2><p>{active.project.visual_style}</p><hr/><h3>Concepts</h3><p>Generate text concepts or create your own direction. Reference images remain an explicit action.</p></section> : view === 'identity' ? <VisualIdentitySidebar selectedConcept={selectedConcept} /> : <section className="context-info"><h2>{view === 'settings' ? 'General settings' : 'Project context'}</h2><p>{view === 'settings' ? 'Defaults here apply across image generation and can be overridden before each generation.' : 'Image generation uses the project defaults unless you override the quality in the confirmation window.'}</p></section>;
+    const sidebar = view === 'concepts' ? <section className="context-info"><h2>Project brief</h2><p>{active.project.creative_brief||active.project.visual_style||'No project brief yet. Add one in General settings or create concepts manually.'}</p><hr/><h3>Concepts</h3><p>Generate text concepts or create your own direction. Reference images remain an explicit action.</p></section> : view === 'identity' ? <VisualIdentitySidebar selectedConcept={selectedConcept} /> : <section className="context-info"><h2>{view === 'settings' ? 'General settings' : 'Project context'}</h2><p>{view === 'settings' ? 'Project information and defaults can be changed without generating anything.' : 'Image generation uses the project defaults unless you override the quality in the confirmation window.'}</p></section>;
     const defaultQuality = active.project.image_quality_preset ?? 'standard';
     const needsConcept = !selectedConcept && view !== 'concepts' && view !== 'settings';
     const page = needsConcept ? <><WorkspaceHeader title="Select a creative direction" description="Visual identity, storyboard, images, and artwork are kept separately for each concept."/><Paper p="lg"><Text mb="md">Choose a concept to open its workspace.</Text><Button onClick={()=>setView('concepts')}>Choose a concept</Button></Paper></> : view === 'identity' ? <VisualIdentity key={JSON.stringify(active.visualIdentity)} projectId={active.project.id} identity={active.visualIdentity} selectedConcept={selectedConcept} defaultQuality={defaultQuality} onRefresh={refreshActive} /> : view === 'concepts' ? <VisualConcepts projectId={active.project.id} concepts={active.concepts} defaultQuality={defaultQuality} onRefresh={refreshActive} /> : view === 'settings' ? <ProjectDetails project={active.project} onSaved={refreshActive} /> : view === 'artwork' ? <ArtworkPage project={active.project} artwork={active.artwork} shots={active.shots} onRefresh={refreshActive}/> : <Storyboard projectId={active.project.id} shots={active.shots} identity={active.visualIdentity} review={active.storyboardReview} defaultQuality={defaultQuality} onRefresh={refreshActive} />;
@@ -140,14 +146,14 @@ function App() {
   const imageProviders = (['openai', 'grok'] as const).filter(provider => providers?.providers[provider].capabilities.imageGeneration);
   const configuredImageProviders = imageProviders.filter(provider => providers?.providers[provider].configured);
   const configuredDefaultProvider = providers?.defaultImageProvider && configuredImageProviders.includes(providers.defaultImageProvider) ? providers.defaultImageProvider : configuredImageProviders[0] ?? 'openai';
-  return <AppLayout headerStart={<Text className="app-brand">AI Music Video Studio</Text>} headerEnd={<Button variant="default" onClick={() => setShowSettings(true)}>Settings</Button>}>
-    <WorkspaceHeader title="Projects" description="Create storyboard images without managing prompts manually." actions={<Button onClick={() => { setError(''); setCreateOpened(true); }}>+ New project</Button>} />
+  return <AppLayout headerStart={<Text className="app-brand">AI Concept Studio</Text>} headerEnd={<Button variant="default" onClick={() => setShowSettings(true)}>Settings</Button>}>
+    <WorkspaceHeader title="Projects" description="Develop visual concepts, identities, storyboards, and artwork from any creative idea." actions={<Button onClick={() => { setError(''); setCreateOpened(true); }}>+ New project</Button>} />
     {error && !createOpened && <Alert color="red" mb="md">{error}</Alert>}
     {!!projects.length ? <Paper className="project-table" p={0}><Table.ScrollContainer minWidth={520}><Table verticalSpacing="sm" horizontalSpacing="md" highlightOnHover>
-      <Table.Thead><Table.Tr><Table.Th>Title</Table.Th><Table.Th>Created at</Table.Th><Table.Th className="project-actions-column">Actions</Table.Th></Table.Tr></Table.Thead>
-      <Table.Tbody>{projects.map(project => <Table.Tr key={project.id}><Table.Td><Text fw={600}>{project.title}</Text></Table.Td><Table.Td><Text c="dimmed" size="sm" title={project.created_at}>{formatCreatedAt(project.created_at)}</Text></Table.Td><Table.Td className="project-actions-column"><Group gap="xs" justify="flex-end" wrap="nowrap"><Tooltip label="Open project"><ActionIcon variant="subtle" size="lg" disabled={busy} aria-label={`Open ${project.title}`} onClick={() => openProject(project.id)}><ArrowRightIcon /></ActionIcon></Tooltip><Tooltip label="Remove project"><ActionIcon variant="subtle" color="red" size="lg" disabled={busy} aria-label={`Remove ${project.title}`} onClick={() => setProjectToDelete(project)}><TrashIcon /></ActionIcon></Tooltip></Group></Table.Td></Table.Tr>)}</Table.Tbody>
+      <Table.Thead><Table.Tr><Table.Th>Title</Table.Th><Table.Th>Type</Table.Th><Table.Th>Created at</Table.Th><Table.Th className="project-actions-column">Actions</Table.Th></Table.Tr></Table.Thead>
+      <Table.Tbody>{projects.map(project => <Table.Tr key={project.id}><Table.Td><Text fw={600}>{project.title}</Text></Table.Td><Table.Td><Text size="sm">{project.project_type==='general'?'General concept':'Music video'}</Text></Table.Td><Table.Td><Text c="dimmed" size="sm" title={project.created_at}>{formatCreatedAt(project.created_at)}</Text></Table.Td><Table.Td className="project-actions-column"><Group gap="xs" justify="flex-end" wrap="nowrap"><Tooltip label="Open project"><ActionIcon variant="subtle" size="lg" disabled={busy} aria-label={`Open ${project.title}`} onClick={() => openProject(project.id)}><ArrowRightIcon /></ActionIcon></Tooltip><Tooltip label="Remove project"><ActionIcon variant="subtle" color="red" size="lg" disabled={busy} aria-label={`Remove ${project.title}`} onClick={() => setProjectToDelete(project)}><TrashIcon /></ActionIcon></Tooltip></Group></Table.Td></Table.Tr>)}</Table.Tbody>
     </Table></Table.ScrollContainer></Paper> : <Paper className="panel empty-projects" p="lg"><h2>No projects yet</h2><p>Create your first project to start developing its visual direction and storyboard.</p><Button onClick={() => { setError(''); setCreateOpened(true); }}>Create project</Button></Paper>}
-    <ProjectCreationModal opened={createOpened} loading={creating} error={error} imageProviders={imageProviders} configuredImageProviders={configuredImageProviders} defaultImageProvider={configuredDefaultProvider} onClose={() => { if (!creating) { setCreateOpened(false); setError(''); } }} onOpenSettings={() => { setCreateOpened(false); setError(''); setShowSettings(true); }} onSubmit={createProject} />
+    <ProjectCreationModal opened={createOpened} loading={creating} error={error} imageProviders={imageProviders} configuredImageProviders={configuredImageProviders} defaultImageProvider={configuredDefaultProvider} textAnalysisAvailable={Boolean(providers?.defaultTextProvider)} onAnalyze={analyzeProjectSource} onClose={() => { if (!creating) { setCreateOpened(false); setError(''); } }} onOpenSettings={() => { setCreateOpened(false); setError(''); setShowSettings(true); }} onSubmit={createProject} />
     <ConfirmModal opened={!!projectToDelete} title="Remove project?" message={projectToDelete ? `Remove “${projectToDelete.title}”? This permanently removes its storyboard, visual identity, and generated-image history.` : ''} confirmLabel="Remove project" confirmColor="red" loading={busy} onCancel={()=>setProjectToDelete(null)} onConfirm={()=>{if(projectToDelete) void deleteProject(projectToDelete).finally(()=>setProjectToDelete(null));}} />
   </AppLayout>;
 }

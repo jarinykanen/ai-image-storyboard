@@ -4,12 +4,13 @@ import { db } from './db.js';
 import { generateImage, generateText, type ImageProvider } from './providers.js';
 import { getSelectedConcept, requireSelectedConceptId } from './visual-concepts.js';
 import { buildSelectedConceptContext } from './visual-concept-prompts.js';
-import { buildSongContext } from './song-context.js';
+import { buildProjectContext, projectType } from './project-context.js';
 import { activateAsset, createGeneratedAsset, createUploadedAsset, listAssets } from './assets.js';
 import type { ImageQuality } from './provider-settings.js';
 import { buildVisualReferenceImagePrompt, buildVisualReferencePrompt } from './visual-reference-prompts.js';
 
 export type ReferenceType = 'character' | 'location';
+export const MAX_VISUAL_REFERENCE_DESCRIPTION_LENGTH = 10_000;
 
 export type VisualStyle = { description: string; image_url: string | null; image_outdated: boolean; locked: boolean; imageAssets: ReturnType<typeof listAssets> };
 export type VisualReference = {
@@ -19,7 +20,7 @@ export type VisualIdentity = { style: VisualStyle; characters: VisualReference[]
 
 const GeneratedReferenceSchema = z.object({
   name: z.string().trim().min(1).max(120),
-  description: z.string().trim().min(1).max(2000),
+  description: z.string().trim().min(1).max(MAX_VISUAL_REFERENCE_DESCRIPTION_LENGTH),
 });
 
 const referenceSignature = (name: string, description: string) => JSON.stringify({ name: name.trim(), description: description.trim() });
@@ -106,16 +107,16 @@ export function setVisualLock(projectId: string, target: 'style' | ReferenceType
     .run(Number(locked),referenceId,projectId,conceptId,target).changes > 0;
 }
 
-export async function generateVisualReference(project: { id: string; image_provider: ImageProvider; aspect_ratio: string; lyrics?: string; suno_description?: string | null }, target: 'style' | ReferenceType, referenceId?: string, qualityPreset?: ImageQuality) {
+export async function generateVisualReference(project: { id: string; project_type?: 'general'|'music_video'; creative_brief?: string | null; visual_style?: string; image_provider: ImageProvider; aspect_ratio: string; lyrics?: string; suno_description?: string | null }, target: 'style' | ReferenceType, referenceId?: string, qualityPreset?: ImageQuality) {
   const concept=getSelectedConcept(project.id); if(!concept) throw new Error('Select a visual concept first.'); const conceptId=concept.id;
   const identity = getVisualIdentity(project.id,conceptId);
   const conceptContext = buildSelectedConceptContext(concept);
-  const songContext = buildSongContext(project);
+  const projectContext = buildProjectContext(project);
   let prompt: string;
   if (target === 'style') {
     if (!identity.style.description.trim()) throw new Error('Add a style description before generating a reference image.');
     if (identity.style.locked) throw new Error('Unlock the style reference before regenerating it.');
-    prompt = `Create a visual style reference image for a music video. ${identity.style.description}.${conceptContext} ${songContext} Do not include text, captions, logos, or watermarks.`;
+    prompt = `Create a visual style reference image for a ${projectType(project) === 'music_video' ? 'music video' : 'visual project'}. ${identity.style.description}.${conceptContext} ${projectContext} Do not include text, captions, logos, or watermarks.`;
   } else {
     const reference = (target === 'character' ? identity.characters : identity.locations).find(item => item.id === referenceId);
     if (!reference) throw new Error('Visual reference not found.');
