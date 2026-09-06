@@ -29,10 +29,36 @@ export function buildStoryboardReviewPrompt(input: { project: ProjectContext; pl
   const shots = input.shots.map(shot => ({ ...shot, imageAvailable: Boolean(shot.imageUrl), imageUrl: undefined }));
   return `Review this ${projectType(input.project) === 'music_video' ? 'music-video ' : ''}storyboard for possible visual and narrative consistency issues. This is advisory criticism, not objective fact. Do not propose automatic changes and do not invent details not present in the context. Assess character and location continuity, visual style, shot variety, narrative progression, motifs, and assigned references. Text-only review is valid; images may be available but are not evidence unless directly supplied.\n\n${buildProjectContext(input.project)}\nSelected concept: ${input.concept ? `${input.concept.title} — ${input.concept.description}; ${input.concept.visualStyle}; ${input.concept.colorAndLighting}` : 'None'}\nVisual identity style: ${input.identity.style.description}\nReferences:\n${references}\nPlan: ${JSON.stringify(input.plan)}\nShots: ${JSON.stringify(shots)}\n\nReturn ONLY JSON: {"summary":"brief balanced summary","score":number|null,"issues":[{"severity":"info|warning|important","category":"CHARACTER CONTINUITY|LOCATION CONTINUITY|VISUAL STYLE|SHOT VARIETY|NARRATIVE|MOTIFS|REFERENCE CONSISTENCY","title":"Possible issue","description":"Cautious practical observation","shotIds":["only IDs from Shots"],"suggestion":"Consider a manual change"}]}. Include only useful issues; use cautious wording such as May, Possible, or Consider.`;
 }
-export type ImageGenerationInput = { visualStyle: string; concept: { title: string; description: string; mood: string; visualStyle: string; colorAndLighting: string } | null; characters: { name: string; description: string }[]; location: { name: string; description: string } | null; description: string; action: string; shotType: string; camera: string; mood: string; previousShot?: { description: string; action: string; locationId: string | null } | null; generationInstructions?: string };
+export const MAX_IMAGE_PROMPT_CHARACTERS = 12_000;
+// Providers receive a final framing instruction in the adapter, so leave room
+// for it here instead of allowing the wire prompt to exceed this budget.
+const MAX_IMAGE_PROMPT_CONTENT_CHARACTERS = 11_500;
+
+type ImagePromptCharacter = { name: string; description: string; imageAsset?: string | null };
+type ImagePromptLocation = { name: string; description: string; imageAsset?: string | null };
+export type ImageGenerationInput = { visualStyle: string; concept: { title: string; description: string; mood: string; visualStyle: string; colorAndLighting: string } | null; characters: ImagePromptCharacter[]; location: ImagePromptLocation | null; description: string; action: string; shotType: string; camera: string; mood: string; previousShot?: { description: string; action: string; locationId: string | null } | null; generationInstructions?: string };
+
+function compactPromptText(value: string | null | undefined, limit: number) {
+  const normalized = (value || '').replace(/\s+/g, ' ').trim();
+  if (normalized.length <= limit) return normalized;
+  const boundary = normalized.lastIndexOf(' ', limit - 1);
+  return `${normalized.slice(0, boundary > limit / 2 ? boundary : limit - 1).trimEnd()}…`;
+}
+
 export function buildImagePrompt(input: ImageGenerationInput) {
+  // Keep the request comfortably below provider prompt limits while reserving the
+  // largest share for the traits that establish a selected character's identity.
+  const characterBudget = input.characters.length ? Math.max(500, Math.floor(5_600 / input.characters.length)) : 0;
   const characterDirection = input.characters.length
-    ? `${input.characters.map(item => `Character reference — ${item.name}: ${item.description}. Preserve this character's recognizable appearance and wardrobe.`).join(' ')} ${input.characters.length > 1 ? 'Include every selected character in this one scene and keep their identities distinct.' : ''}`
+    ? `HIGHEST PRIORITY — SELECTED CHARACTER IDENTITY:\n${input.characters.map(item => {
+      const referenceImage = item.imageAsset ? ' The attached character reference image is the primary visual source of truth for face, hair, body, wardrobe, and distinguishing features.' : '';
+      return `${compactPromptText(item.name, 160)}: ${compactPromptText(item.description, characterBudget)}.${referenceImage} Reproduce this character recognizably; do not substitute or redesign them.`;
+    }).join('\n')}\n${input.characters.length > 1 ? 'Show every selected character and keep their identities clearly distinct.' : ''}`
     : '';
-  return `Storyboard keyframe. Visual style: ${input.visualStyle}. ${input.concept ? `Selected visual concept: ${input.concept.title}. ${input.concept.description}. Mood: ${input.concept.mood}. Lighting: ${input.concept.colorAndLighting}.` : ''} ${characterDirection} ${input.location ? `Location reference — ${input.location.name}: ${input.location.description}. Preserve environmental continuity.` : ''} ${input.previousShot ? `Previous-shot continuity: ${input.previousShot.description}; action: ${input.previousShot.action}.` : ''} Shot: ${input.description}. Action: ${input.action}. Composition: ${input.shotType}; camera: ${input.camera}. Mood: ${input.mood}. ${input.generationInstructions || ''} No text, captions, logos, or watermarks.`;
+  const shotDirection = `SHOT TO CREATE:\n${compactPromptText(input.description, 3_000)}\nAction: ${compactPromptText(input.action, 700)}\nComposition: ${compactPromptText(input.shotType, 300)}; camera: ${compactPromptText(input.camera, 500)}. Mood: ${compactPromptText(input.mood, 400)}.`;
+  const locationDirection = input.location ? `Location continuity: ${compactPromptText(input.location.name, 160)} — ${compactPromptText(input.location.description, 1_200)}. ${input.location.imageAsset ? 'Use its attached reference image for the environment.' : ''}` : '';
+  const conceptDirection = input.concept ? `Supporting creative direction: ${compactPromptText(input.concept.title, 160)}. ${compactPromptText(input.concept.description, 1_000)}. Mood: ${compactPromptText(input.concept.mood, 300)}. Lighting: ${compactPromptText(input.concept.colorAndLighting, 500)}.` : '';
+  const continuityDirection = input.previousShot ? `Previous-shot continuity (secondary): ${compactPromptText(input.previousShot.description, 700)}; action: ${compactPromptText(input.previousShot.action, 300)}.` : '';
+  const prompt = `Create one storyboard keyframe.\n\n${characterDirection}\n\n${shotDirection}\n\n${locationDirection}\n${conceptDirection}\nVisual style (rendering only, never override character identity): ${compactPromptText(input.visualStyle, 1_000)}.\n${continuityDirection}\n${compactPromptText(input.generationInstructions, 600)}\n\nNo text, captions, logos, or watermarks. Character identity and the selected character reference images override all conflicting style, concept, location, or continuity guidance.`.replace(/\n{3,}/g, '\n\n').trim();
+  return compactPromptText(prompt, MAX_IMAGE_PROMPT_CONTENT_CHARACTERS);
 }

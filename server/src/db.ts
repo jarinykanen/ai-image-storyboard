@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS shots (
   position INTEGER NOT NULL,
   start_seconds REAL,
   end_seconds REAL,
+  duration_seconds REAL,
   description TEXT NOT NULL,
   camera TEXT NOT NULL,
   mood TEXT NOT NULL,
@@ -196,6 +197,7 @@ addShotColumn('character_ids', "TEXT NOT NULL DEFAULT '[]'");
 addShotColumn('location_id', 'TEXT');
 addShotColumn('generation_status', "TEXT NOT NULL DEFAULT 'pending'");
 addShotColumn('approval_status', "TEXT NOT NULL DEFAULT 'unapproved'");
+addShotColumn('duration_seconds', 'REAL');
 
 const generationColumns = new Set((db.prepare('PRAGMA table_info(image_generations)').all() as { name: string }[]).map(column => column.name));
 if (!generationColumns.has('concept_id')) db.exec('ALTER TABLE image_generations ADD COLUMN concept_id TEXT');

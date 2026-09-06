@@ -2,7 +2,7 @@
 
 AI Concept Studio is a local-first application for developing visual concepts, consistent storyboard imagery, and publishing artwork from a general creative brief. Music-video projects remain fully supported, including optional lyrics and SUNO context. It is designed for non-technical users: normal workflows expose creative choices and clear generation actions rather than prompts, seeds, or provider payloads.
 
-The application currently supports still-image production. Song upload, audio analysis, animatic playback, and image-to-video generation are not implemented yet.
+The application currently supports still-image production. It can also prepare copy-ready Grok Imagine video prompts for individual timed shots; it does not generate videos. Song upload, audio analysis, animatic playback, and image-to-video generation are not implemented yet.
 
 ## Current workflow
 
@@ -41,6 +41,8 @@ The application currently supports still-image production. Song upload, audio an
 - Character and location image generation treats the saved reference description as authoritative; visual-style text supplies compatible aesthetics without importing scene content from a style image
 - Reference-image version history, activation, download, and non-destructive clearing
 - Locking for visual style, characters, and locations
+- Selected current character references are prioritized for storyboard-image conditioning; their descriptions and reference images override conflicting style or scene guidance. Locking prevents edits; it does not disable a current reference image.
+- Storyboard-image prompts are compacted to a 12,000-character budget, reserving the largest portion for selected-character identity and the shot itself.
 - Outdated-image indicators when the associated description changes
 - Direct reference-image input when the selected provider and model support it; text descriptions remain available as a fallback
 
@@ -48,7 +50,9 @@ The application currently supports still-image production. Song upload, audio an
 
 - AI-generated storyboards with configurable shot count and detail level
 - Externally imported storyboard shots: arbitrary prose, Markdown, lists, JSON, and mixed AI responses are analyzed into editable structured shots without generating images
+- Single-shot imports: copy a detail-level-aware prompt from a shot editor, paste another AI's response, and update that shot while preserving its timing and image history
 - Timed, ordered shots with section, description, action, shot type, camera, mood, character, and location fields
+- Explicit, copy-only Grok Imagine video prompts for one timed shot, grounded in project context, visual identity, assigned references, shot duration, and an optional primary shot-composition technique
 - Manual shot insertion before or after existing shots
 - Shot editing, deletion, and AI regeneration of an individual shot plan
 - AI consistency review with scored, categorized issues that can be resolved or ignored
@@ -178,6 +182,7 @@ The most useful next product layer is audio-aware planning and playback:
 
 1. Upload a song and derive duration, waveform, sections, and beat markers.
 2. Edit shot timing on a visual timeline.
+   Individual shots can already store an optional start time and length in seconds; those values are ready for future video-generation and timeline work.
 3. Preview the storyboard as an animatic synchronized to the song.
 4. Track structured continuity details such as wardrobe, props, lighting, and screen direction.
 5. Export approved shots to editing timelines and, later, add explicit image-to-video generation.

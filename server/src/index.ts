@@ -14,13 +14,15 @@ import { acknowledgeVisualReferenceImage, activateVisualReferenceAsset, clearVis
 import { ConceptInputSchema, createConcept, deleteConcept, generateConceptImage, generateConcepts, getConcept, getConcepts, getSelectedConcept, regenerateConcept, requireSelectedConceptId, selectConcept, updateConcept, uploadConceptImage } from './visual-concepts.js';
 import { buildExternalConceptPrompt, buildExternalConceptUpdatePrompt } from './visual-concept-prompts.js';
 import { analyzeExternalConceptSource, ConceptImportAnalysisError, ExternalConceptSourceInput } from './concept-import.js';
-import { analyzeExternalStoryboardSource, buildExternalStoryboardImportPrompt, ExternalStoryboardSourceInput, StoryboardImportAnalysisError } from './storyboard-import.js';
+import { analyzeExternalShotSource, analyzeExternalStoryboardSource, buildExternalShotImportPrompt, buildExternalStoryboardImportPrompt, ExternalShotSourceInput, ExternalStoryboardSourceInput, ShotImportAnalysisError, StoryboardImportAnalysisError } from './storyboard-import.js';
 import { findAsset, MAX_IMAGE_UPLOAD_BYTES } from './assets.js';
 import { buildCanvaExport, canvaExportSummary } from './canva-export.js';
 import { allPlatformPresets, platformPresets, type PlatformId } from './platform-presets.js';
 import { deleteArtworkAsset, generateArtwork, listArtwork, refineArtwork, updateArtwork, uploadArtwork, useSourceAsArtwork } from './artwork.js';
 import { type Provider, type ImageQuality, type ImageResolution, type ImageTier, ProviderCapabilityError, ProviderCredentialError, ProviderNotConfiguredError, findImageModel, getProviderRegistry, getProviderSettings, normalizeProviderError, providerErrorMessage, removeProviderKey, resolveImageConfiguration, resolveProvider, saveProviderKey, testProvider } from './provider-settings.js';
 import { analyzeProjectSource } from './project-import.js';
+import { buildGrokImagineVideoPrompt } from './grok-imagine-video-prompts.js';
+import { findShotComposition, shotCompositions } from './video-prompt-options.js';
 
 const app = express();
 app.use(cors());
@@ -179,7 +181,9 @@ app.put('/api/projects/:id/image-settings', (req, res) => {
 function asShot(row: any) {
   const identity = getVisualIdentity(row.project_id,row.concept_id); const characterIds = JSON.parse(row.character_ids || '[]'); const locationId = row.location_id ?? null;
   const referencePreview = [...identity.characters.filter(item => characterIds.includes(item.id)), ...identity.locations.filter(item => item.id === locationId), { id: 'visual-style', name: 'Visual Style', description: identity.style.description, image_url: identity.style.image_url }];
-  return { id: row.id, order: row.position, startTime: row.start_seconds ?? null, endTime: row.end_seconds ?? null, section: row.section, title: row.title, description: row.description, action: row.action, shotType: row.shot_type, camera: row.camera, mood: row.mood, characterIds, locationId, imageUrl: row.image_url ?? null, generationStatus: row.generation_status || row.status, approvalStatus: row.approval_status || 'unapproved', generations: listGenerations(row.id), referencePreview };
+  const startTime = row.start_seconds ?? null, endTime = row.end_seconds ?? null;
+  const durationSeconds = row.duration_seconds ?? (startTime !== null && endTime !== null ? endTime - startTime : null);
+  return { id: row.id, order: row.position, startTime, endTime, durationSeconds, section: row.section, title: row.title, description: row.description, action: row.action, shotType: row.shot_type, camera: row.camera, mood: row.mood, characterIds, locationId, imageUrl: row.image_url ?? null, generationStatus: row.generation_status || row.status, approvalStatus: row.approval_status || 'unapproved', generations: listGenerations(row.id), referencePreview };
 }
 function shotContent(row: any): StoryboardShotContent { const shot = asShot(row); return { section: shot.section, title: shot.title, description: shot.description, action: shot.action, shotType: shot.shotType, camera: shot.camera, mood: shot.mood, characterIds: shot.characterIds, locationId: shot.locationId }; }
 function getStoryboardPlan(projectId: string, conceptId=getSelectedConcept(projectId)?.id): StoryboardPlan | null { const row = conceptId ? db.prepare('SELECT * FROM storyboard_plans WHERE project_id=? AND concept_id=?').get(projectId,conceptId) as any : null; return row ? { approach: row.approach, summary: row.summary, narrativeArc: row.narrative_arc, opening: row.opening, midpoint: row.midpoint, climax: row.climax, ending: row.ending, motifs: JSON.parse(row.motifs), primaryCharacterIds: JSON.parse(row.primary_character_ids), primaryLocationIds: JSON.parse(row.primary_location_ids), pacingNotes: row.pacing_notes } : null; }
@@ -187,7 +191,7 @@ function saveStoryboardPlan(projectId: string, conceptId:string, plan: Storyboar
 function reviewContextSignature(projectId: string) {
   const conceptId=requireSelectedConceptId(projectId);
   const project = db.prepare('SELECT title,project_type,creative_brief,lyrics,suno_description,visual_style FROM projects WHERE id=?').get(projectId);
-  const shots = db.prepare('SELECT id,position,section,title,description,action,shot_type,camera,mood,character_ids,location_id,image_url FROM shots WHERE project_id=? AND concept_id=? ORDER BY position').all(projectId,conceptId);
+  const shots = db.prepare('SELECT id,position,start_seconds,end_seconds,duration_seconds,section,title,description,action,shot_type,camera,mood,character_ids,location_id,image_url FROM shots WHERE project_id=? AND concept_id=? ORDER BY position').all(projectId,conceptId);
   return JSON.stringify({ project, plan: getStoryboardPlan(projectId,conceptId), identity: getVisualIdentity(projectId,conceptId), concept: getSelectedConcept(projectId), shots });
 }
 function getLatestStoryboardReview(projectId: string) {
@@ -451,6 +455,21 @@ app.get('/api/projects/:id/storyboard/external-prompt', (req, res) => {
   res.json({ prompt: buildExternalStoryboardImportPrompt({ project, identity: getVisualIdentity(req.params.id), concept: getSelectedConcept(req.params.id) }) });
 });
 
+app.get('/api/projects/:id/shots/:shotId/video-prompt', (req, res) => {
+  const project = requireProject(req.params.id, res); if (!project) return;
+  const conceptId = requireSelectedConceptId(req.params.id);
+  const row = db.prepare('SELECT * FROM shots WHERE id=? AND project_id=? AND concept_id=?').get(req.params.shotId, req.params.id, conceptId) as any;
+  if (!row) return res.status(404).json({ error: 'Storyboard shot not found.' });
+  const shot = asShot(row);
+  if (shot.durationSeconds === null || shot.durationSeconds <= 0) return res.status(400).json({ error: 'Add a shot length before preparing a video prompt so Grok Imagine receives the intended clip duration.' });
+  const compositionName = typeof req.query.composition === 'string' ? req.query.composition : undefined;
+  const shotComposition = findShotComposition(compositionName);
+  if (compositionName && !shotComposition) return res.status(400).json({ error: 'Choose a shot composition from the available options.' });
+  res.json({ provider: 'grok-imagine', durationSeconds: shot.durationSeconds, prompt: buildGrokImagineVideoPrompt({ project, identity: getVisualIdentity(project.id, conceptId), concept: getSelectedConcept(project.id), shot, shotComposition }) });
+});
+
+app.get('/api/video-prompt-options', (_req, res) => res.json({ shotCompositions }));
+
 app.post('/api/projects/:id/storyboard/import', async (req, res, next) => {
   try {
     const project = requireProject(req.params.id, res); if (!project) return;
@@ -516,6 +535,28 @@ app.post('/api/projects/:id/shots', (req, res) => {
   const inserted = insertedIds.map(id => asShot(db.prepare('SELECT * FROM shots WHERE id=?').get(id)));
   res.status(201).json({ count: inserted.length, shots: inserted });
 });
+app.get('/api/projects/:id/shots/:shotId/external-prompt', (req, res) => {
+  const project = requireProject(req.params.id, res); if (!project) return;
+  const detailLevel = z.coerce.number().int().min(0).max(100).default(50).parse(req.query.detailLevel);
+  const conceptId = requireSelectedConceptId(req.params.id); const row = db.prepare('SELECT * FROM shots WHERE id=? AND project_id=? AND concept_id=?').get(req.params.shotId, req.params.id, conceptId) as any;
+  if (!row) return res.status(404).json({ error: 'Storyboard shot not found.' });
+  res.json({ prompt: buildExternalShotImportPrompt({ project, identity: getVisualIdentity(req.params.id), concept: getSelectedConcept(req.params.id), shot: shotContent(row), detailLevel }) });
+});
+app.post('/api/projects/:id/shots/:shotId/import', async (req, res, next) => {
+  try {
+    const project = requireProject(req.params.id, res); if (!project) return;
+    const input = ExternalShotSourceInput.parse(req.body); const conceptId = requireSelectedConceptId(req.params.id);
+    const row = db.prepare('SELECT * FROM shots WHERE id=? AND project_id=? AND concept_id=?').get(req.params.shotId, req.params.id, conceptId) as any;
+    if (!row) return res.status(404).json({ error: 'Storyboard shot not found.' });
+    const imported = await analyzeExternalShotSource({ project, identity: getVisualIdentity(req.params.id), concept: getSelectedConcept(req.params.id), currentShot: shotContent(row), detailLevel: input.detailLevel, source: input.response });
+    const visualChanged = row.description !== imported.description || row.action !== imported.action || row.shot_type !== imported.shotType || row.camera !== imported.camera || row.mood !== imported.mood || row.character_ids !== JSON.stringify(imported.characterIds) || (row.location_id ?? null) !== imported.locationId;
+    db.transaction(() => {
+      db.prepare('UPDATE shots SET section=?, title=?, description=?, action=?, shot_type=?, camera=?, mood=?, character_ids=?, location_id=?, generation_status=?, status=? WHERE id=?').run(imported.section, imported.title, imported.description, imported.action, imported.shotType, imported.camera, imported.mood, JSON.stringify(imported.characterIds), imported.locationId, visualChanged && row.image_url ? 'needs_regeneration' : row.generation_status, visualChanged && row.image_url ? 'stale' : row.status, row.id);
+      if (visualChanged) { db.prepare("UPDATE image_generations SET stale=1 WHERE shot_id=? AND tier='FINAL'").run(row.id); db.prepare("UPDATE image_assets SET stale=1 WHERE id IN (SELECT asset_id FROM image_generations WHERE shot_id=? AND tier='FINAL')").run(row.id); }
+    })();
+    res.json(asShot(db.prepare('SELECT * FROM shots WHERE id=?').get(row.id)));
+  } catch (error) { if (error instanceof ShotImportAnalysisError) return res.status(422).json({ error: error.message, code: 'SHOT_IMPORT_ANALYSIS_FAILED' }); next(error); }
+});
 
 app.delete('/api/projects/:id/shots/:shotId', (req, res) => {
   if (!requireProject(req.params.id, res)) return;
@@ -580,7 +621,7 @@ app.put('/api/projects/:id/storyboard-review/issues/:issueId', (req, res) => {
 
 // Generated storyboard descriptions can be long-form creative direction. Keep
 // edits compatible with the same 20k ceiling used for other project text.
-const ShotEditInput = z.object({ title: z.string().trim().min(1).max(200).optional(), section: z.string().trim().min(1).max(200).optional(), description: z.string().min(1).max(20000), action: z.string().min(1).max(2000), shotType: z.string().min(1).max(200), camera: z.string().min(1).max(500), mood: z.string().min(1).max(500), characterIds: z.array(z.string()).max(20), locationId: z.string().nullable() });
+const ShotEditInput = z.object({ title: z.string().trim().min(1).max(200).optional(), section: z.string().trim().min(1).max(200).optional(), description: z.string().min(1).max(20000), action: z.string().max(2000), shotType: z.string().min(1).max(200), camera: z.string().min(1).max(500), mood: z.string().min(1).max(500), characterIds: z.array(z.string()).max(20), locationId: z.string().nullable(), startTime: z.number().finite().min(0).nullable().optional(), durationSeconds: z.number().finite().positive().max(15).nullable().optional() });
 app.put('/api/projects/:id/shots/:shotId', (req, res) => {
   const project = requireProject(req.params.id, res); if (!project) return;
   const input = ShotEditInput.parse(req.body);
@@ -590,7 +631,11 @@ app.put('/api/projects/:id/shots/:shotId', (req, res) => {
   if (input.characterIds.some(id => !characters.has(id)) || (input.locationId && !locations.has(input.locationId))) return res.status(400).json({ error: 'Choose characters and locations from this project.' });
   const visualChanged = shot.description !== input.description || shot.action !== input.action || shot.shot_type !== input.shotType || shot.camera !== input.camera || shot.mood !== input.mood || shot.character_ids !== JSON.stringify(input.characterIds) || (shot.location_id ?? null) !== input.locationId;
   db.transaction(() => {
-    db.prepare(`UPDATE shots SET title=?, section=?, description=?, action=?, shot_type=?, camera=?, mood=?, character_ids=?, location_id=?, generation_status=?, status=? WHERE id=?`).run(input.title ?? shot.title, input.section ?? shot.section, input.description, input.action, input.shotType, input.camera, input.mood, JSON.stringify(input.characterIds), input.locationId, visualChanged && shot.image_url ? 'needs_regeneration' : shot.generation_status, visualChanged && shot.image_url ? 'stale' : shot.status, shot.id);
+    const currentDuration = shot.duration_seconds ?? (shot.start_seconds != null && shot.end_seconds != null ? shot.end_seconds - shot.start_seconds : null);
+    const startTime = input.startTime === undefined ? shot.start_seconds ?? null : input.startTime;
+    const durationSeconds = input.durationSeconds === undefined ? currentDuration : input.durationSeconds;
+    const endTime = input.startTime === undefined && input.durationSeconds === undefined ? shot.end_seconds ?? null : startTime !== null && durationSeconds !== null ? startTime + durationSeconds : null;
+    db.prepare(`UPDATE shots SET title=?, section=?, description=?, action=?, shot_type=?, camera=?, mood=?, character_ids=?, location_id=?, start_seconds=?, end_seconds=?, duration_seconds=?, generation_status=?, status=? WHERE id=?`).run(input.title ?? shot.title, input.section ?? shot.section, input.description, input.action, input.shotType, input.camera, input.mood, JSON.stringify(input.characterIds), input.locationId, startTime, endTime, durationSeconds, visualChanged && shot.image_url ? 'needs_regeneration' : shot.generation_status, visualChanged && shot.image_url ? 'stale' : shot.status, shot.id);
     if (visualChanged) {
       db.prepare("UPDATE image_generations SET stale=1 WHERE shot_id=? AND tier='FINAL'").run(shot.id);
       db.prepare("UPDATE image_assets SET stale=1 WHERE id IN (SELECT asset_id FROM image_generations WHERE shot_id=? AND tier='FINAL')").run(shot.id);

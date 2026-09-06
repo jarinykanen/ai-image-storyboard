@@ -20,7 +20,10 @@ type Project = { id: string; visual_style: string };
 type Shot = { id: string; character_ids?: string | null; location_id?: string | null; description: string; action?: string | null; image_url?: string | null; generation_status?: string | null };
 
 function fromVisual(reference: VisualReference, type: 'character' | 'location'): NormalizedReference {
-  return { id: reference.id, type, name: reference.name, description: reference.description, imageAsset: reference.locked ? reference.image_url : null, locked: reference.locked, stale: reference.image_outdated };
+  // Locking prevents edits; it must not silently disable a selected, current
+  // reference image from guiding generation. Outdated images remain text-only
+  // until the user refreshes or explicitly marks them current.
+  return { id: reference.id, type, name: reference.name, description: reference.description, imageAsset: reference.image_outdated ? null : reference.image_url, locked: reference.locked, stale: reference.image_outdated };
 }
 
 /** Resolves only the identity records assigned to a shot. This is deliberately
@@ -37,7 +40,7 @@ export function resolveReferenceContext(project: Project, shot: Shot, previous?:
   const location = assignedLocation ? fromVisual(assignedLocation, 'location') : null;
   const style: NormalizedReference = {
     id: 'visual-style', type: 'style', name: 'Visual Style', description: identity.style.description || project.visual_style,
-    imageAsset: identity.style.locked ? identity.style.image_url : null, locked: identity.style.locked, stale: identity.style.image_outdated,
+    imageAsset: identity.style.image_outdated ? null : identity.style.image_url, locked: identity.style.locked, stale: identity.style.image_outdated,
   };
   const previousCharacters = new Set(JSON.parse(previous?.character_ids || '[]') as string[]);
   const sharesCharacter = characterIds.some(id => previousCharacters.has(id));

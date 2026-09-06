@@ -2,6 +2,7 @@ import OpenAI from 'openai';
 import { ProviderCapabilityError, requireProviderKey, resolveTierConfiguration, resolveProvider, type ImageQuality, type ImageResolution, type ImageTier, type Provider } from './provider-settings.js';
 import type { ReferenceContext, NormalizedReference } from './reference-context.js';
 import { logAiPrompt } from './ai-prompt-logger.js';
+import { MAX_IMAGE_PROMPT_CHARACTERS } from './storyboard-prompts.js';
 
 export type ImageProvider = 'openai' | 'grok';
 export type ImageReference = NormalizedReference;
@@ -58,6 +59,7 @@ export async function generateImage(provider: ImageProvider, request: ImageGener
   console.info('[reference-context]', JSON.stringify({ shotId: request.shotId, selected: selectedReferences.map(item => ({ id: item.id, type: item.type, textOnly: !item.imageAsset, stale: item.stale })), continuity: request.referenceContext.continuityReference?.id, model: config.model.modelId, referenceImages: referenceImages.map(item => item.id), omitted: omitted.map(item => item.id) }));
   if (referenceImages.length && !config.model.referenceImageSupport) console.info(`[${provider}] reference assets for shot ${request.shotId} are represented by their current text descriptions; this model does not accept reference-image conditioning.`);
   const prompt = enforceSingleFrameOutput(request.prompt);
+  console.info('[image-prompt]', JSON.stringify({ shotId: request.shotId, characters: request.referenceContext.characters.length, characterImageReferences: request.referenceContext.characters.filter(item => Boolean(item.imageAsset)).length, charactersWithoutImageReference: request.referenceContext.characters.filter(item => !item.imageAsset).map(item => item.id), charactersOmittedFromReferenceInput: omitted.filter(item => item.type === 'character').map(item => item.id), promptCharacters: prompt.length, promptBudget: MAX_IMAGE_PROMPT_CHARACTERS }));
   if (provider === 'grok') {
     logAiPrompt({ provider, model: config.model.modelId, operation: 'image.generate', projectId: request.projectId, targetId: request.shotId }, prompt);
     const response = await client.images.generate({

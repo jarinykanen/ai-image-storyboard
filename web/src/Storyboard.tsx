@@ -4,6 +4,7 @@ import { ConfirmModal } from './ConfirmModal';
 import { ImageGenerationModal, type ImageQuality } from './ImageGenerationModal';
 import { StoryboardGenerationModal } from './StoryboardGenerationModal';
 import { ShotRegenerationModal } from './ShotRegenerationModal';
+import { ShotDetailSlider } from './ShotDetailSlider';
 import type { VisualIdentityData } from './VisualIdentity';
 import './storyboard.css';
 type Generation = {
@@ -27,6 +28,7 @@ export type StoryboardShot = {
     order: number;
     startTime: number | null;
     endTime: number | null;
+    durationSeconds: number | null;
     section: string;
     title: string;
     description: string;
@@ -95,6 +97,30 @@ function StoryboardImportModal({ opened, currentShotCount, loading, prompt, prom
       </Stack>
     </Modal>;
 }
+function ShotImportPanel({ projectId, shotId, loading, onImport }: { projectId: string; shotId: string; loading: boolean; onImport: (source: string, detailLevel: number) => void }) {
+    const [detailLevel, setDetailLevel] = useState(50), [prompt, setPrompt] = useState(''), [promptLoading, setPromptLoading] = useState(false), [source, setSource] = useState('');
+    useEffect(() => { let active = true; setPromptLoading(true); void request(`/projects/${projectId}/shots/${shotId}/external-prompt?detailLevel=${detailLevel}`, 'GET').then(result => { if (active) setPrompt((result as { prompt: string }).prompt); }).catch(() => { if (active) setPrompt(''); }).finally(() => { if (active) setPromptLoading(false); }); return () => { active = false; }; }, [projectId, shotId, detailLevel]);
+    return <details className="shot-import-panel"><summary>Import shot details from another AI</summary><Stack gap="md" mt="md"><Text size="sm">Copy the structured prompt, use it with another AI, then paste its response. This does not generate an image, and your shot timing is preserved.</Text><ShotDetailSlider value={detailLevel} disabled={loading || promptLoading} onChange={setDetailLevel} label="Requested shot detail" description="Choose how much visual detail the other AI should include." ariaLabel="Requested shot detail"/><Textarea aria-label="Shot import prompt" value={prompt} readOnly autosize minRows={6} maxRows={12} placeholder={promptLoading ? 'Preparing prompt…' : 'Prompt unavailable'}/><Group justify="space-between"><Text size="sm" c="dimmed">Copying this prompt does not update the shot.</Text><Button variant="default" loading={promptLoading} disabled={!prompt || loading} onClick={() => void navigator.clipboard.writeText(prompt).catch(() => undefined)}>Copy prompt</Button></Group><Textarea label="AI response" value={source} onChange={event => setSource(event.currentTarget.value)} autosize minRows={6} maxRows={14} disabled={loading} placeholder="Paste the other AI’s response here…"/><Button loading={loading} disabled={!source.trim()} onClick={() => onImport(source, detailLevel)}>Update shot</Button></Stack></details>;
+}
+function VideoPromptButton({ projectId, shotId, disabled }: { projectId: string; shotId: string; disabled: boolean }) {
+    const [opened, setOpened] = useState(false), [loading, setLoading] = useState(false), [prompt, setPrompt] = useState(''), [durationSeconds, setDurationSeconds] = useState<number | null>(null), [error, setError] = useState(''), [copied, setCopied] = useState(false), [compositions, setCompositions] = useState<{ name: string; description: string }[]>([]), [composition, setComposition] = useState<string | null>(null);
+    const prepare = async (nextComposition = composition, opening = false) => {
+        if (opening) setOpened(true);
+        setLoading(true); setPrompt(''); setDurationSeconds(null); setError(''); setCopied(false);
+        try {
+            const promptPath = `/projects/${projectId}/shots/${shotId}/video-prompt${nextComposition ? `?composition=${encodeURIComponent(nextComposition)}` : ''}`;
+            const [result, optionResult] = await Promise.all([request(promptPath, 'GET') as Promise<{ prompt: string; durationSeconds: number }>, compositions.length ? Promise.resolve(null) : request('/video-prompt-options', 'GET') as Promise<{ shotCompositions: { name: string; description: string }[] }>]);
+            setPrompt(result.prompt); setDurationSeconds(result.durationSeconds); if (optionResult) setCompositions(optionResult.shotCompositions);
+        }
+        catch (e) { setError(e instanceof Error ? e.message : 'Could not prepare the video prompt.'); }
+        finally { setLoading(false); }
+    };
+    const copy = async () => {
+        try { if (!navigator.clipboard?.writeText) throw new Error('Clipboard access is unavailable. Select and copy the prompt from the box instead.'); await navigator.clipboard.writeText(prompt); setCopied(true); }
+        catch (e) { setError(e instanceof Error ? e.message : 'Could not copy the prompt.'); }
+    };
+    return <><Button variant="default" disabled={disabled} onClick={() => void prepare(composition, true)}>Prepare video prompt</Button><Modal opened={opened} onClose={() => setOpened(false)} title="Video prompt for Grok Imagine" size="xl" centered><Stack gap="md"><Text size="sm" c="dimmed">This prepares a copy-ready prompt only. It does not generate a video or use credits in the studio.</Text><Select label="Shot composition" description="Optional. The selected composition is treated as a primary visual instruction." placeholder="Choose a composition" searchable clearable data={compositions.map(item => ({ value: item.name, label: `${item.name} — ${item.description}` }))} value={composition} onChange={value => { setComposition(value); void prepare(value); }} disabled={loading}/>{durationSeconds !== null && <Text size="sm">Clip length: {durationSeconds}s</Text>}{error && <Alert color="red">{error}</Alert>}<Textarea aria-label="Grok Imagine video prompt" value={prompt} readOnly autosize minRows={10} maxRows={18} placeholder={loading ? 'Preparing video prompt…' : 'Prompt unavailable'}/><Group justify="flex-end"><Button variant="default" onClick={() => setOpened(false)}>Close</Button><Button disabled={!prompt || loading} onClick={() => void copy()}>{copied ? 'Copied' : 'Copy prompt'}</Button></Group></Stack></Modal></>;
+}
 function Detail({ shot, shots, identity, projectId, defaultQuality, busy, run, go, close }: {
     shot: StoryboardShot;
     shots: StoryboardShot[];
@@ -105,7 +131,7 @@ function Detail({ shot, shots, identity, projectId, defaultQuality, busy, run, g
     run: (f: () => Promise<unknown>) => Promise<boolean>;
     go: (id: string) => void;
     close: () => void;
-}) { const [editing, setEditing] = useState(false), [compare, setCompare] = useState(false), [deleteGeneration, setDeleteGeneration] = useState<Generation | null>(null), [confirmShotDelete, setConfirmShotDelete] = useState(false), [confirmShotRegeneration, setConfirmShotRegeneration] = useState(false), [confirmImageGeneration, setConfirmImageGeneration] = useState(false), [confirmFinal, setConfirmFinal] = useState(false), [variantDialog, setVariantDialog] = useState(false), [variantCount, setVariantCount] = useState('3'), [refineAssetId, setRefineAssetId] = useState<string | null>(null), [refineInstruction, setRefineInstruction] = useState(''), [version, setVersion] = useState(0), [form, setForm] = useState({ title: shot.title, section: shot.section, description: shot.description, action: shot.action, shotType: shot.shotType, camera: shot.camera, mood: shot.mood, characterIds: shot.characterIds, locationId: shot.locationId }); useEffect(() => { setEditing(false); setCompare(false); setConfirmShotDelete(false); setConfirmShotRegeneration(false); setConfirmImageGeneration(false); setConfirmFinal(false); setVariantDialog(false); setRefineAssetId(null); setRefineInstruction(''); setVersion(Math.max(0, shot.generations.findIndex(g => g.active))); setForm({ title: shot.title, section: shot.section, description: shot.description, action: shot.action, shotType: shot.shotType, camera: shot.camera, mood: shot.mood, characterIds: shot.characterIds, locationId: shot.locationId }); }, [shot]); const index = shots.findIndex(s => s.id === shot.id), image = shot.generations[version], activeImage = shot.generations.find(g => g.active), generated = shot.generations.filter(g => g.status === 'generated'), needsFinal = shot.approvalStatus === 'approved' && (!activeImage || activeImage.source === 'uploaded' || activeImage.tier !== 'FINAL' || activeImage.stale); const variants = () => setVariantDialog(true); const remove = (g: Generation) => setDeleteGeneration(g); const actions = (g: Generation) => <>{!g.active && <button className="secondary" disabled={busy} onClick={() => void run(() => request(`/projects/${projectId}/shots/${shot.id}/generations/${g.id}/use`, 'POST', {}))}>Set as active</button>}{g.assetId && <a className="button secondary" href={`${API}/assets/${g.assetId}/download`}>Download</a>}<button className="secondary" disabled={busy} onClick={() => remove(g)}>Delete</button>
+}) { const [editing, setEditing] = useState(false), [compare, setCompare] = useState(false), [deleteGeneration, setDeleteGeneration] = useState<Generation | null>(null), [confirmShotDelete, setConfirmShotDelete] = useState(false), [confirmShotRegeneration, setConfirmShotRegeneration] = useState(false), [confirmImageGeneration, setConfirmImageGeneration] = useState(false), [confirmFinal, setConfirmFinal] = useState(false), [variantDialog, setVariantDialog] = useState(false), [variantCount, setVariantCount] = useState('3'), [refineAssetId, setRefineAssetId] = useState<string | null>(null), [refineInstruction, setRefineInstruction] = useState(''), [version, setVersion] = useState(0), [form, setForm] = useState({ title: shot.title, section: shot.section, description: shot.description, action: shot.action, shotType: shot.shotType, camera: shot.camera, mood: shot.mood, characterIds: shot.characterIds, locationId: shot.locationId, startTime: shot.startTime, durationSeconds: shot.durationSeconds }); useEffect(() => { setEditing(false); setCompare(false); setConfirmShotDelete(false); setConfirmShotRegeneration(false); setConfirmImageGeneration(false); setConfirmFinal(false); setVariantDialog(false); setRefineAssetId(null); setRefineInstruction(''); setVersion(Math.max(0, shot.generations.findIndex(g => g.active))); setForm({ title: shot.title, section: shot.section, description: shot.description, action: shot.action, shotType: shot.shotType, camera: shot.camera, mood: shot.mood, characterIds: shot.characterIds, locationId: shot.locationId, startTime: shot.startTime, durationSeconds: shot.durationSeconds }); }, [shot]); const index = shots.findIndex(s => s.id === shot.id), image = shot.generations[version], activeImage = shot.generations.find(g => g.active), generated = shot.generations.filter(g => g.status === 'generated'), needsFinal = shot.approvalStatus === 'approved' && (!activeImage || activeImage.source === 'uploaded' || activeImage.tier !== 'FINAL' || activeImage.stale); const variants = () => setVariantDialog(true); const remove = (g: Generation) => setDeleteGeneration(g); const actions = (g: Generation) => <>{!g.active && <button className="secondary" disabled={busy} onClick={() => void run(() => request(`/projects/${projectId}/shots/${shot.id}/generations/${g.id}/use`, 'POST', {}))}>Set as active</button>}{g.assetId && <a className="button secondary" href={`${API}/assets/${g.assetId}/download`}>Download</a>}<button className="secondary" disabled={busy} onClick={() => remove(g)}>Delete</button>
 </>; return <>
 <section className="review-view">
 <div className="review-toolbar">
@@ -137,6 +163,10 @@ function Detail({ shot, shots, identity, projectId, defaultQuality, busy, run, g
 <TextInput label="Title" value={form.title} onChange={event => setForm({ ...form, title: event.currentTarget.value })}/>
 <TextInput label="Section" value={form.section} onChange={event => setForm({ ...form, section: event.currentTarget.value })}/>
 </div>
+<div className="row">
+<NumberInput label="Start time (seconds)" description="Optional placement in the future video." value={form.startTime ?? ''} min={0} decimalScale={2} onChange={value => setForm({ ...form, startTime: typeof value === 'number' ? value : null })}/>
+<NumberInput label="Shot length (seconds)" description="Up to 15 seconds. Used for future video generation; it does not change the image." value={form.durationSeconds ?? ''} min={0.01} max={15} decimalScale={2} onChange={value => setForm({ ...form, durationSeconds: typeof value === 'number' ? value : null })}/>
+</div>
 <label>Description<textarea value={form.description} onChange={e => setForm({ ...form, description: e.target.value })}/>
 </label>
 <label>Action<textarea value={form.action} onChange={e => setForm({ ...form, action: e.target.value })}/>
@@ -162,6 +192,7 @@ searchable
 <label>Location<select value={form.locationId ?? ''} onChange={e => setForm({ ...form, locationId: e.target.value || null })}>
 <option value="">No location</option>{identity.locations.map(i => <option key={i.id} value={i.id}>{i.name}</option>)}</select>
 </label>
+<ShotImportPanel projectId={projectId} shotId={shot.id} loading={busy} onImport={(response, detailLevel) => void run(() => request(`/projects/${projectId}/shots/${shot.id}/import`, 'POST', { response, detailLevel }))}/>
 <div className="card-actions">
 <button disabled={busy} onClick={() => { void run(() => request(`/projects/${projectId}/shots/${shot.id}`, 'PUT', form)); setEditing(false); }}>Save changes</button>
 <button className="secondary" onClick={() => setEditing(false)}>Cancel</button>
@@ -176,9 +207,11 @@ searchable
 <dd>{shot.shotType} · {shot.camera}</dd>
 <dt>Mood</dt>
 <dd>{shot.mood}</dd>
+{shot.durationSeconds !== null && <><dt>Timing</dt><dd>{shot.startTime !== null ? `Starts at ${shot.startTime}s · ` : ''}{shot.durationSeconds}s long{shot.endTime !== null ? ` · Ends at ${shot.endTime}s` : ''}</dd></>}
 </dl>
 <div className="card-actions">
 <button className="secondary" disabled={busy} onClick={() => setConfirmImageGeneration(true)}>{shot.imageUrl ? 'Regenerate' : 'Generate'}</button>
+<VideoPromptButton projectId={projectId} shotId={shot.id} disabled={busy}/>
 <button className="secondary" disabled={busy} onClick={variants}>Generate variants</button>{shot.generations.length > 1 && <button className="secondary" onClick={() => setCompare(true)}>Compare</button>}<button disabled={busy || !shot.imageUrl || shot.approvalStatus === 'approved'} onClick={() => void run(() => request(`/projects/${projectId}/shots/${shot.id}/approve`, 'POST', {}))}>{shot.approvalStatus === 'approved' ? 'Approved' : 'Approve'}</button>
 {needsFinal && <button disabled={busy} onClick={() => setConfirmFinal(true)}>Render final</button>}
 <button className="secondary" disabled={busy} onClick={() => setConfirmShotRegeneration(true)}>Regenerate shot details</button>
@@ -275,6 +308,7 @@ function StoryboardShotCard({ shot, selected, busy, canAdd, projectId, run, onOp
 <div onClick={event => event.stopPropagation()}><Checkbox label="Select" checked={selected} onChange={event => onSelect(event.currentTarget.checked)}/></div>
 <small>Shot {shot.order} · {shot.section}</small>
 <h3>{shot.title}</h3>
+{shot.durationSeconds !== null && <small>{shot.startTime !== null ? `${shot.startTime}s · ` : ''}{shot.durationSeconds}s long{shot.endTime !== null ? ` · ends ${shot.endTime}s` : ''}</small>}
 <p>{shot.description}</p>
 </div>
 </article>
